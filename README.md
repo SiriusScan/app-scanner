@@ -61,6 +61,13 @@ SiriusScan is designed to streamline the process of network vulnerability scanni
         ├── manager.go       # ScanManager: listens for and processes scan requests
         ├── strategies.go    # ScanStrategy interface and its implementations
         └── updater.go       # ScanUpdater: handles KV store scan state updates
+└── modules
+    └── nmap
+        ├── nmap.go          # Nmap integration library
+    └── rustscan
+        ├── rustscan.go      # Rustscan integration library 
+└── tests
+    └── test.go              # Individual function tests and development execution testing.
 ```        
         
 ## Getting Started

@@ -11,7 +11,11 @@ import (
 	"github.com/SiriusScan/go-api/sirius"
 )
 
-func Scan(target string) (sirius.Host, error) {
+// Scan is a function variable that can be overridden for testing.
+var Scan = scanImpl
+
+// scanImpl is the default implementation of the RustScan.
+func scanImpl(target string) (sirius.Host, error) {
 	log.Printf("Starting Rust Scan %s", target)
 
 	cmd := exec.Command("rustscan", "-a", target, "--ulimit", "5000", "--scan-order", "serial", "--top", "-g")
@@ -52,8 +56,7 @@ func parseHostInfo(line string) sirius.Host {
 		port, err := strconv.Atoi(p)
 		if err == nil {
 			siriusPort := sirius.Port{
-				ID: port,
-				// Since we don't have Protocol and State info here, you might want to set some defaults or leave them empty
+				ID:       port,
 				Protocol: "",
 				State:    "",
 			}

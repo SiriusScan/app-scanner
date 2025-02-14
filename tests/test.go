@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/SiriusScan/app-scanner/modules/nmap"
+	"github.com/SiriusScan/go-api/nvd"
 	"github.com/SiriusScan/go-api/sirius"
 	"github.com/SiriusScan/go-api/sirius/host"
 	_ "github.com/SiriusScan/go-api/sirius/postgres"
@@ -50,7 +51,7 @@ func testTemplate() {
 	// fmt.Println(target)
 }
 
-func testGetVulnerability(id string) sirius.Entry {
+func testGetVulnerability(id string) nvd.CveItem {
 	vuln, err := vulnerability.GetVulnerability(id)
 	if err != nil {
 		log.Fatalf("Error getting vulnerability: %v", err)
@@ -72,12 +73,12 @@ func testGetHost(ip string) sirius.Host {
 	return target
 }
 
-func testUpdateHost(target sirius.Host) {
-	err := host.UpdateHost(target)
-	if err != nil {
-		fmt.Println(err)
-	}
-}
+// func testUpdateHost(target sirius.Host) {
+// 	err := host.UpdateHost(target)
+// 	if err != nil {
+// 		fmt.Println(err)
+// 	}
+// }
 
 func dbMigrate() {
 

@@ -11,7 +11,11 @@ import (
 	"github.com/lair-framework/go-nmap"
 )
 
-func Scan(target string) (sirius.Host, error) {
+// Scan is a function variable that can be overridden for testing.
+var Scan = scanImpl
+
+// scanImpl is the default implementation of the Nmap scan.
+func scanImpl(target string) (sirius.Host, error) {
 	fmt.Printf("Scanning target %s\n", target)
 
 	// Initialize an empty sirius.Host object
@@ -22,12 +26,6 @@ func Scan(target string) (sirius.Host, error) {
 	if err != nil {
 		return host, err
 	}
-
-	// Test from file
-	// output, err := os.ReadFile("test.xml")
-	// if err != nil {
-	// 	return sirius.Host{}, err
-	// }
 
 	// Process the XML data
 	host, err = processNmapOutput(string(output))
@@ -54,7 +52,6 @@ func executeNmap(target string) (string, error) {
 
 func processNmapOutput(output string) (sirius.Host, error) {
 	fmt.Println("Processing Nmap output")
-	// fmt.Println(output)
 	host := sirius.Host{}
 
 	var nmapRun nmap.NmapRun
@@ -119,42 +116,30 @@ type CVE struct {
 func getCVEs(nmapHost nmap.Host) []string {
 	cvelist := []string{}
 
-	//fmt.Println(nmapHost.HostScripts)
-
-	// Convert nmapHost to sirius.Host
-	//CVEs from HostScript Output
+	// Extract CVEs from HostScript Output
 	if len(nmapHost.HostScripts) > 0 {
 		for _, hostScript := range nmapHost.HostScripts {
 			for _, line := range strings.Split(strings.TrimSuffix(hostScript.Output, "\n"), "\n") {
-				//fmt.Println(line)
 				if strings.Contains(line, "CVE-") {
 					cveid := strings.Split(line, "CVE-")[1]
-
-					// Truncate CVE ID to a specific length, based on its actual length
 					if len(cveid) > 9 {
 						cveid = cveid[:10]
 					} else {
 						cveid = cveid[:9]
 					}
-
 					cvelist = append(cvelist, cveid)
 				}
 			}
 		}
 	}
 
-	// THIS IS GHETTO AND BAD AND I SHOULD FEEL BAD - but it works for now
+	// Extract CVEs from Port Script Output
 	for i := 0; i < len(nmapHost.Ports); i++ {
-
-		//CVEs from Port Script Output
 		for j := 0; j < len(nmapHost.Ports[i].Scripts); j++ {
 			scriptOutput := nmapHost.Ports[i].Scripts[j].Output
-
 			for _, line := range strings.Split(strings.TrimSuffix(scriptOutput, "\n"), "\n") {
-				//fmt.Println(line)
 				if strings.Contains(line, "CVE-") {
 					cveid := strings.Split(line, "CVE-")[1]
-
 					if len(cveid) > 9 {
 						cveid = cveid[:10]
 						cvelist = append(cvelist, cveid)
