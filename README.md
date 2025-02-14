@@ -1,4 +1,4 @@
-# SiriusScan Vulnerability Scanner
+# Sirius Scan Engine
 
 SiriusScan is a modular, extensible vulnerability scanner built on top of industry tools like Nmap and RustScan. It leverages design patterns such as Strategy, Factory, and Command to separate concerns and improve maintainability. The scanner listens for incoming scan requests via RabbitMQ, processes them through multiple scanning phases (discovery and vulnerability), and updates scan state in a key–value store (KVStore) for live monitoring.
 
