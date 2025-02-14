@@ -41,6 +41,7 @@ func Scan(target string) (sirius.Host, error) {
 }
 
 func parseHostInfo(line string) sirius.Host {
+	log.Printf("Parsing host info: %s", line)
 	parts := strings.Split(line, " -> ")
 	ip := parts[0]
 	portStrs := strings.Trim(parts[1], "[]")

@@ -40,6 +40,7 @@ func Scan(target string) (sirius.Host, error) {
 
 func executeNmap(target string) (string, error) {
 	cmd := exec.Command("nmap", "-T4", "-sV", "-Pn", "--script=vuln,vulners,safe,default,smb-os-discovery", target, "-oX", "-")
+	// cmd := exec.Command("nmap", "-T5", "-sV", "-Pn", "--script=vulners", target, "-oX", "-")
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -53,6 +54,7 @@ func executeNmap(target string) (string, error) {
 
 func processNmapOutput(output string) (sirius.Host, error) {
 	fmt.Println("Processing Nmap output")
+	// fmt.Println(output)
 	host := sirius.Host{}
 
 	var nmapRun nmap.NmapRun

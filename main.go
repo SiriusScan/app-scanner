@@ -1,103 +1,35 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 
-	"github.com/SiriusScan/go-api/sirius"
-	"github.com/SiriusScan/go-api/sirius/host"
-	"github.com/SiriusScan/go-api/sirius/queue"
-
-	nmap "github.com/SiriusScan/app-scanner/modules/nmap"
-	rustscan "github.com/SiriusScan/app-scanner/modules/rustscan"
+	"github.com/SiriusScan/app-scanner/internal/scan"
+	"github.com/SiriusScan/go-api/sirius/store"
 )
-
-type ScanMessage struct {
-	Message string `json:"message"`
-}
 
 func main() {
 	fmt.Println("Scanner service is running...")
 
-	// Function to handle messages from the scan queue
-	coreExecution := func(msg string) {
-		log.Printf("Received message: %s", msg)
-
-		// Unmarshal the JSON string into a ScanMessage struct
-		var scanMsg ScanMessage
-		err := json.Unmarshal([]byte(msg), &scanMsg)
-		if err != nil {
-			log.Printf("Failed to unmarshal message: %s", err)
-			return
-		}
-
-		// Now scanMsg.Message contains the "message" field from the JSON
-		log.Printf("Initiating new scan! Targets: %s", scanMsg.Message)
-
-		// Convert string to array
-		targetList := strings.Split(scanMsg.Message, ",")
-
-		// Iterate over array
-		for _, target := range targetList {
-			go func(t string) {
-				ScanHandler(t)
-			}(target)
-		}
-	}
-
-	queue.Listen("scan", coreExecution)
-}
-
-func ScanHandler(target string) {
-	log.Printf("Scanning target %s", target)
-	discoveryResults, err := DiscoveryScan(target)
+	// Create a new KVStore.
+	kvStore, err := store.NewValkeyStore()
 	if err != nil {
-		// Target is not online, return
-		return
+		log.Fatalf("Error creating KV store: %v", err)
 	}
+	defer kvStore.Close()
 
-	// * Target is online, addHost to database & start scan
-	// * Add host to database
-	err = host.AddHost(discoveryResults)
-	if err != nil {
-		log.Println(err)
-	}
+	// Instantiate the scan tool factory.
+	toolFactory := &scan.ScanToolFactory{}
 
-	// * Start scan
-	scanResults, err := VulnerabilityScan(discoveryResults)
-	if err != nil {
-		log.Println(err)
-	}
+	// Create the scan updater for KV store updates.
+	scanUpdater := scan.NewScanUpdater(kvStore)
 
-	// * Update host with vuln information
-	err = host.AddHost(scanResults)
-	if err != nil {
-		log.Println(err)
-	}
-	log.Println("Scan complete!")
-}
+	// Create the scan manager.
+	scanManager := scan.NewScanManager(kvStore, toolFactory, scanUpdater)
 
-func DiscoveryScan(target string) (sirius.Host, error) {
-	log.Printf("Discovering target %s", target)
+	// Begin listening for scan requests.
+	scanManager.ListenForScans()
 
-	// rust scan
-	discoveryResults, err := rustscan.Scan(target)
-	if err != nil {
-		return sirius.Host{}, err
-	}
-
-	return discoveryResults, nil
-}
-
-func VulnerabilityScan(host sirius.Host) (sirius.Host, error) {
-	log.Printf("Performing vulnerability discovery for: %s", host.IP)
-
-	nmapResults, err := nmap.Scan(host.IP)
-	if err != nil {
-		log.Printf("Error performing Nmap scan: %s", err)
-		return sirius.Host{}, err
-	}
-	return nmapResults, nil
+	// Block the main thread to keep the service running.
+	select {}
 }

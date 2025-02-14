@@ -1,6 +1,8 @@
 module github.com/SiriusScan/app-scanner
 
-go 1.20
+go 1.22.0
+
+toolchain go1.22.5
 
 replace github.com/SiriusScan/go-api => ../go-api
 
@@ -22,8 +24,10 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.22 // indirect
 	github.com/streadway/amqp v1.1.0 // indirect
 	github.com/tursodatabase/libsql-client-go v0.0.0-20240902231107-85af5b9d094d // indirect
+	github.com/valkey-io/valkey-go v1.0.54 // indirect
 	golang.org/x/crypto v0.8.0 // indirect
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	gorm.io/driver/sqlite v1.5.7 // indirect
 )
