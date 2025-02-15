@@ -1,6 +1,8 @@
 # Sirius Scan Engine
 
-SiriusScan is a modular, extensible vulnerability scanner built on top of industry tools like Nmap and RustScan. It leverages design patterns such as Strategy, Factory, and Command to separate concerns and improve maintainability. The scanner listens for incoming scan requests via RabbitMQ, processes them through multiple scanning phases (discovery and vulnerability), and updates scan state in a key–value store (KVStore) for live monitoring.
+Sirius Scan is a modular, extensible vulnerability scanner built on top of industry tools like Nmap and RustScan. 
+
+The scanner listens for incoming scan requests via RabbitMQ, processes them through multiple scanning phases (discovery and vulnerability), and updates scan state in a key–value store (ValKey) for live monitoring.
 
 ---
 
@@ -8,7 +10,6 @@ SiriusScan is a modular, extensible vulnerability scanner built on top of indust
 
 - [Overview](#overview)
 - [Features](#features)
-- [Architecture & Design Patterns](#architecture--design-patterns)
 - [Directory Structure](#directory-structure)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
@@ -20,8 +21,7 @@ SiriusScan is a modular, extensible vulnerability scanner built on top of indust
 
 ## Overview
 
-SiriusScan is designed to streamline the process of network vulnerability scanning by:
-- **Decoupling responsibilities**: Separating scan management, strategy implementations, and KV store updates.
+Sirius Scan is designed to streamline the process of network vulnerability scanning by:
 - **Leveraging message queues**: Using RabbitMQ to receive and process scan commands.
 - **Real-time updates**: Keeping scan results updated in a KV store for live monitoring.
 - **Extensibility**: Easily adding new scanning strategies or tools by updating the factory and strategy implementations.
@@ -35,15 +35,6 @@ SiriusScan is designed to streamline the process of network vulnerability scanni
 - **Live Updates**: Integrates with a KV store to update scan progress in real time.
 - **Modular Architecture**: Employs Strategy and Factory patterns for scalable design.
 - **Asynchronous Processing**: Leverages Go's goroutines for concurrent target processing.
-
----
-
-## Architecture & Design Patterns
-
-- **Strategy Pattern**: Encapsulates scanning techniques (e.g., discovery and vulnerability scanning) in interchangeable implementations.
-- **Factory Pattern**: Dynamically creates the appropriate scan strategy based on the scan phase.
-- **Command Pattern**: (Potential extension) Can encapsulate scanning actions for scheduling, logging, or retries.
-- **Observer Pattern**: (In future iterations) Could be used for real-time notifications to update UI components.
 
 ---
 
@@ -74,7 +65,7 @@ SiriusScan is designed to streamline the process of network vulnerability scanni
 
 ### Prerequisites
 
-- **Go 1.XX+**: Make sure you have Go installed on your system.
+- **Go 1.23+**: Make sure you have Go installed on your system.
 - **RabbitMQ**: Used for messaging. Ensure it's running and accessible.
 - **KV Store**: A key–value store implementation provided by the `go-api/sirius/store` package.
 - **Other Dependencies**: Refer to the `go.mod` file for the complete list of Go modules.

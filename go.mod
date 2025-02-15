@@ -4,10 +4,10 @@ go 1.22.0
 
 toolchain go1.22.5
 
-replace github.com/SiriusScan/go-api => ../go-api
+//replace github.com/SiriusScan/go-api => ../go-api
 
 require (
-	github.com/SiriusScan/go-api v0.0.2
+	github.com/SiriusScan/go-api v0.0.3
 	github.com/lair-framework/go-nmap v0.0.0-20191202052157-3507e0b03523
 	gorm.io/driver/postgres v1.5.2
 	gorm.io/gorm v1.25.12
