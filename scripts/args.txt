@@ -1,0 +1,17 @@
+# Nmap Script Arguments
+# Format: key=value
+
+# Vulners script arguments
+vulners.showall=true
+vulners.searchall=true
+
+# HTTP scripts arguments
+http.useragent=Mozilla/5.0 (compatible; SiriusScan)
+http.max-connections=5
+
+# SSL/TLS scripts arguments
+ssl-enum-ciphers.protocols=SSLv3,TLSv1.0,TLSv1.1,TLSv1.2,TLSv1.3
+
+# General arguments
+timeout=10s
+max-retries=3
