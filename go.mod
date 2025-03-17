@@ -7,7 +7,7 @@ toolchain go1.22.5
 // replace github.com/SiriusScan/go-api => ../go-api //Development
 
 require (
-	github.com/SiriusScan/go-api v0.0.3
+	github.com/SiriusScan/go-api v0.0.4
 	github.com/lair-framework/go-nmap v0.0.0-20191202052157-3507e0b03523
 	github.com/projectdiscovery/goflags v0.1.68
 	github.com/projectdiscovery/naabu/v2 v2.3.4
