@@ -287,7 +287,12 @@ func (sm *ScanManager) runDiscovery(ip string) error {
 
 	log.Printf("Discovery scan completed for %s. Found %d ports.", ip, len(discoveryResults.Ports))
 
-	// Add discovered host to the database, but handle DB errors gracefully
+	// Only persist host if at least one port is found
+	if len(discoveryResults.Ports) == 0 {
+		log.Printf("No open ports found for %s, not persisting host.", discoveryResults.IP)
+		return nil
+	}
+
 	err = host.AddHost(discoveryResults)
 	if err != nil {
 		log.Printf("Warning: Failed to add host %s to database: %v", discoveryResults.IP, err)

@@ -106,8 +106,9 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	// Potential script args file locations
 	argsFilePaths := []string{
 		"/opt/sirius/nse/sirius-nse/scripts/args.txt", // Docker NSE path
-		"/app-scanner/scripts/args.txt",               // Docker app-scanner path
-		"scripts/args.txt",                            // Local path
+		"/app-scanner/scripts/args.txt",               // Docker app-scanner path (production)
+		"/app-scanner-src/scripts/args.txt",           // Docker app-scanner-src path (development)
+		"scripts/args.txt",                            // Local path (relative to working directory)
 	}
 
 	// Find the first args file that exists
@@ -133,9 +134,10 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	if containsAny(protocols, "smb") || strings.Contains(scriptFlag, "smb-vuln") {
 		// When any protocol includes SMB or when using SMB scripts, ensure port 445 is included
 		if len(protocols) > 0 && containsAny(protocols, "*") {
-			// For full scans, include common ports with SMB
-			portSpec = "21-25,80,135,139,443,445,3389,1-1000"
-			fmt.Println("🎯 Running full port scan including SMB port 445")
+			// For full scans, use the full range (1-1000 already includes 21-25, 80, 135, 139, 443, 445)
+			// but also include some higher ports like 3389
+			portSpec = "1-1000,3389"
+			fmt.Println("🎯 Running full port scan including common ports and RDP")
 		} else {
 			// For targeted SMB scans, focus on common Windows/SMB ports
 			portSpec = "135,139,445,3389"
@@ -143,8 +145,8 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 		}
 	} else {
 		// Even for general scans, ensure port 445 is included for SMB scans
-		portSpec = "1-1000,445"
-		fmt.Println("🎯 Using default port range: 1-1000 plus SMB port 445")
+		portSpec = "1-1000"
+		fmt.Println("🎯 Using default port range: 1-1000")
 	}
 
 	// Add port specification

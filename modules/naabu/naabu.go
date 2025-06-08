@@ -2,6 +2,7 @@ package naabu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/projectdiscovery/naabu/v2/pkg/result"
 	"github.com/projectdiscovery/naabu/v2/pkg/runner"
 )
+
+var ErrHostDown = errors.New("host appears to be down (no open ports found)")
 
 // Scan is a function variable that can be overridden for testing
 var Scan = scanImpl
@@ -61,6 +64,10 @@ func scanImpl(target string, config ScanConfig) (sirius.Host, error) {
 
 	if err := naabuRunner.RunEnumeration(context.Background()); err != nil {
 		return sirius.Host{}, fmt.Errorf("naabu enumeration failed: %v", err)
+	}
+
+	if len(results) == 0 {
+		return sirius.Host{}, ErrHostDown
 	}
 
 	return sirius.Host{

@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -141,7 +142,16 @@ type NaabuStrategy struct {
 }
 
 func (n *NaabuStrategy) Execute(target string) (sirius.Host, error) {
-	return naabu.Scan(target, naabu.ScanConfig{
+	host, err := naabu.Scan(target, naabu.ScanConfig{
 		PortRange: n.Ports,
+		Retries:   n.Retries,
 	})
+	if errors.Is(err, naabu.ErrHostDown) {
+		log.Printf("Host %s appears down (no open ports found by NAABU), skipping further scans.", target)
+		return sirius.Host{}, nil
+	}
+	if err != nil {
+		return sirius.Host{}, err
+	}
+	return host, nil
 }
