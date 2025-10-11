@@ -7,7 +7,7 @@ toolchain go1.24.1
 replace github.com/SiriusScan/go-api => ../go-api //Development
 
 require (
-	github.com/SiriusScan/go-api v0.0.7
+	github.com/SiriusScan/go-api v0.0.9
 	github.com/lair-framework/go-nmap v0.0.0-20191202052157-3507e0b03523
 	github.com/projectdiscovery/goflags v0.1.68
 	github.com/projectdiscovery/naabu/v2 v2.3.4
@@ -116,7 +116,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/ulikunitz/xz v0.5.11 // indirect
-	github.com/valkey-io/valkey-go v1.0.59 // indirect
+	github.com/valkey-io/valkey-go v1.0.60 // indirect
 	github.com/weppos/publicsuffix-go v0.30.2-0.20230730094716-a20f9abcc222 // indirect
 	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 // indirect
 	github.com/yl2chen/cidranger v1.0.2 // indirect
