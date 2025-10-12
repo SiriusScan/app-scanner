@@ -152,6 +152,16 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	// Add port specification
 	args = append(args, "-p", portSpec)
 
+	// Add script path to tell Nmap where to find our custom scripts
+	// This is CRITICAL - without this, Nmap only looks in /usr/share/nmap/scripts/
+	nmapScriptPaths := []string{
+		"/opt/sirius/nse/sirius-nse/scripts",     // Primary custom script location
+		"/usr/share/nmap/scripts",                // Default nmap scripts
+	}
+	scriptPathArg := strings.Join(nmapScriptPaths, ":")
+	args = append(args, "--script-path", scriptPathArg)
+	fmt.Printf("📂 Using script paths: %s\n", scriptPathArg)
+
 	// Add script flag - don't hardcode smb-vuln-ms17-010, use the dynamic scriptFlag
 	args = append(args, "--script", scriptFlag)
 
@@ -192,7 +202,21 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("error executing Nmap: %w\nStderr: %s", err, stderr.String())
+		stderrStr := stderr.String()
+		
+		// Check if the error is due to NSE script issues (non-fatal)
+		if strings.Contains(stderrStr, "did not match a category, filename, or directory") ||
+			strings.Contains(stderrStr, "NSE: failed to initialize the script engine") {
+			// Log the script error but don't fail the entire scan
+			fmt.Printf("⚠️  NSE Script Error (non-fatal): %s\n", stderrStr)
+			fmt.Println("🔄 Attempting fallback scan without problematic scripts...")
+			
+			// Retry with a minimal safe script set
+			return executeFallbackScan(config)
+		}
+		
+		// For other errors, return the error
+		return "", fmt.Errorf("error executing Nmap: %w\nStderr: %s", err, stderrStr)
 	}
 
 	// Log raw output for debugging
@@ -214,6 +238,54 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	}
 
 	return rawOutput, nil
+}
+
+// executeFallbackScan runs a basic Nmap scan with only safe, essential scripts
+// This is used when the full script scan fails due to script errors
+func executeFallbackScan(config ScanConfig) (string, error) {
+	fmt.Println("🛡️  Running fallback scan with minimal safe scripts...")
+	
+	// Build minimal safe command - just version detection and basic info
+	args := []string{
+		"-T4",  // Timing template
+		"-sV",  // Version detection
+		"-Pn",  // Treat all hosts as online
+		"-p", "1-1000", // Standard port range
+	}
+	
+	// Only use the most reliable default scripts
+	safeScripts := []string{
+		"banner",      // Basic banner grabbing
+		"http-title",  // HTTP title detection
+		"ssl-cert",    // SSL certificate info
+	}
+	
+	// Add script path
+	scriptPaths := []string{
+		"/opt/sirius/nse/sirius-nse/scripts",
+		"/usr/share/nmap/scripts",
+	}
+	args = append(args, "--script-path", strings.Join(scriptPaths, ":"))
+	
+	// Add safe scripts
+	args = append(args, "--script", strings.Join(safeScripts, ","))
+	
+	// Add target and output format
+	args = append(args, config.Target, "-oX", "-", "-v")
+	
+	fmt.Printf("🔍 Executing fallback Nmap with args: %v\n", args)
+	cmd := exec.Command("nmap", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		// If even the fallback scan fails, return a basic error
+		return "", fmt.Errorf("fallback scan also failed: %w\nStderr: %s", err, stderr.String())
+	}
+	
+	fmt.Println("✅ Fallback scan completed successfully")
+	return stdout.String(), nil
 }
 
 // ScriptResult represents the parsed output of an NSE script

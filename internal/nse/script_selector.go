@@ -38,15 +38,52 @@ func (s *ScriptSelector) SelectScripts(protocols ...string) []string {
 func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error) {
 	// Directly use script IDs for Nmap rather than full paths
 	var scriptIDs []string
+	
+	// Check if this is a wildcard scan (all protocols)
+	isWildcardScan := containsProtocol(protocols, "*")
 
 	// For each script in manifest, check if it matches the protocols
 	for id, script := range s.manifest.Scripts {
+		// Skip wildcard scripts when doing a wildcard scan to avoid overload
+		// We'll add curated scripts instead
+		if isWildcardScan && script.Protocol == "*" {
+			continue
+		}
+		
 		// Include scripts that match any of the protocols or have "*" protocol
-		if script.Protocol == "*" || containsProtocol(protocols, script.Protocol) || containsProtocol(protocols, "*") {
+		if script.Protocol == "*" || containsProtocol(protocols, script.Protocol) || isWildcardScan {
+			// For wildcard scans, only include scripts from priority protocols
+			if isWildcardScan && !isPriorityProtocol(script.Protocol) {
+				continue
+			}
+			
 			// Ensure script ID doesn't have .nse extension
 			scriptID := strings.TrimSuffix(id, ".nse")
 			scriptIDs = append(scriptIDs, scriptID)
 		}
+	}
+	
+	// For wildcard scans, add curated essential scripts
+	if isWildcardScan {
+		essentialScripts := []string{
+			"vulners",              // CVE detection
+			"http-title",           // HTTP service identification
+			"http-enum",            // HTTP enumeration
+			"ssh-hostkey",          // SSH key fingerprinting
+			"ssl-cert",             // SSL certificate info
+			"banner",               // Basic banner grabbing
+			"smb-vuln-ms17-010",    // Critical SMB vulnerability
+			"smb-os-discovery",     // SMB OS detection
+			"ftp-anon",             // Anonymous FTP
+		}
+		
+		for _, script := range essentialScripts {
+			if !containsScriptID(scriptIDs, script) {
+				scriptIDs = append(scriptIDs, script)
+			}
+		}
+		
+		println("🌐 Wildcard scan detected - using curated essential script set")
 	}
 
 	// Always add the SMB vulnerability script for critical security checks
@@ -60,19 +97,92 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 		return "vulners", nil
 	}
 
+	// Limit total scripts to prevent overload
+	maxScripts := 50 // Reasonable limit to prevent timeout/overload
+	if len(scriptIDs) > maxScripts {
+		println("⚠️  Warning: Script count", len(scriptIDs), "exceeds maximum of", maxScripts, "- truncating to priority scripts")
+		scriptIDs = prioritizeScripts(scriptIDs, maxScripts)
+	}
+
 	// Join script IDs with commas
 	scriptList := strings.Join(scriptIDs, ",")
 
 	// Log the final script list for debugging
 	if len(protocols) > 0 && protocols[0] == "smb" {
 		// This is an SMB-specific scan
-		println("🎯 SMB vulnerability scan with scripts:", scriptList)
+		println("🎯 SMB vulnerability scan with", len(scriptIDs), "scripts:", scriptList)
 	} else {
 		// This is a general scan
-		println("🎯 General vulnerability scan including scripts:", scriptList)
+		println("🎯 Vulnerability scan with", len(scriptIDs), "scripts")
 	}
 
 	return scriptList, nil
+}
+
+// isPriorityProtocol determines if a protocol should be included in wildcard scans
+func isPriorityProtocol(protocol string) bool {
+	priorityProtocols := map[string]bool{
+		"http":  true,
+		"https": true,
+		"ssh":   true,
+		"smb":   true,
+		"ftp":   true,
+		"smtp":  true,
+		"dns":   true,
+		"mysql": true,
+		"postgres": true,
+	}
+	return priorityProtocols[strings.ToLower(protocol)]
+}
+
+// prioritizeScripts selects the most important scripts from a larger set
+func prioritizeScripts(scriptIDs []string, maxCount int) []string {
+	// Define priority keywords for script importance
+	priorityKeywords := []string{
+		"vuln",    // Vulnerability detection
+		"cve",     // CVE-specific
+		"exploit", // Exploits
+		"auth",    // Authentication issues
+		"brute",   // Brute force detection
+		"anon",    // Anonymous access
+		"enum",    // Enumeration
+	}
+	
+	var priorityScripts []string
+	var otherScripts []string
+	
+	// Separate into priority and other
+	for _, scriptID := range scriptIDs {
+		isPriority := false
+		lowerID := strings.ToLower(scriptID)
+		for _, keyword := range priorityKeywords {
+			if strings.Contains(lowerID, keyword) {
+				isPriority = true
+				break
+			}
+		}
+		
+		if isPriority {
+			priorityScripts = append(priorityScripts, scriptID)
+		} else {
+			otherScripts = append(otherScripts, scriptID)
+		}
+	}
+	
+	// Take all priority scripts first, then fill remaining with others
+	result := priorityScripts
+	remaining := maxCount - len(result)
+	if remaining > 0 && len(otherScripts) > 0 {
+		if remaining > len(otherScripts) {
+			remaining = len(otherScripts)
+		}
+		result = append(result, otherScripts[:remaining]...)
+	} else if len(result) > maxCount {
+		// Even priority scripts exceed limit, truncate
+		result = result[:maxCount]
+	}
+	
+	return result
 }
 
 // containsProtocol checks if the protocol list contains a specific protocol
