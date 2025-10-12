@@ -97,13 +97,6 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 		return "vulners", nil
 	}
 
-	// Limit total scripts to prevent overload
-	maxScripts := 50 // Reasonable limit to prevent timeout/overload
-	if len(scriptIDs) > maxScripts {
-		println("⚠️  Warning: Script count", len(scriptIDs), "exceeds maximum of", maxScripts, "- truncating to priority scripts")
-		scriptIDs = prioritizeScripts(scriptIDs, maxScripts)
-	}
-
 	// Prepend full path to each script ID for Nmap 7.80 compatibility
 	// (Nmap 7.80 doesn't support --script-path, so we use absolute paths)
 	var scriptPaths []string
