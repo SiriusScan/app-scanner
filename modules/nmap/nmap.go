@@ -114,10 +114,7 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	// Add port specification
 	args = append(args, "-p", portSpec)
 
-	// Use --datadir to point Nmap to custom sirius-nse scripts directory
-	args = append(args, "--datadir", "/opt/sirius/nse/sirius-nse")
-
-	// Add script flag (will use scripts from custom datadir)
+	// Add script flag (Nmap will use sirius-nse scripts via symlink)
 	args = append(args, "--script", scriptFlag)
 
 	// Add script args file if found
@@ -173,10 +170,7 @@ func executeFallbackScan(config ScanConfig) (string, error) {
 		"ssl-cert",
 	}
 
-	// Use --datadir to point to custom sirius-nse scripts
-	args = append(args, "--datadir", "/opt/sirius/nse/sirius-nse")
-
-	// Add safe scripts
+	// Add safe scripts (will use sirius-nse via symlink)
 	args = append(args, "--script", strings.Join(safeScripts, ","))
 
 	// Add target and output format
