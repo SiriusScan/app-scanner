@@ -86,27 +86,27 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 	if isWildcardScan {
 		essentialScripts := []string{
 			// TOP PRIORITY: CVE Detection
-			"vulners",           // Comprehensive CVE database lookup (HIGHEST VALUE)
-			
+			"vulners", // Comprehensive CVE database lookup (HIGHEST VALUE)
+
 			// Service Identification (needed for context)
-			"banner",            // Basic banner grabbing
-			"http-title",        // HTTP service identification
-			"ssl-cert",          // SSL certificate info
-			
+			"banner",     // Basic banner grabbing
+			"http-title", // HTTP service identification
+			"ssl-cert",   // SSL certificate info
+
 			// Critical Vulnerabilities
-			"smb-vuln-ms17-010", // EternalBlue (critical SMB vulnerability)
-			"http-shellshock",   // Shellshock vulnerability
+			"smb-vuln-ms17-010",      // EternalBlue (critical SMB vulnerability)
+			"http-shellshock",        // Shellshock vulnerability
 			"http-vuln-cve2017-5638", // Apache Struts RCE
-			
+
 			// Service Discovery
-			"http-enum",         // HTTP path enumeration
-			"smb-os-discovery",  // SMB OS detection
-			"ftp-anon",          // Anonymous FTP access
+			"http-enum",        // HTTP path enumeration
+			"smb-os-discovery", // SMB OS detection
+			"ftp-anon",         // Anonymous FTP access
 		}
 
 		// Add all essential scripts to the list
 		scriptIDs = essentialScripts
-		
+
 		println("🎯 Wildcard scan - using minimal high-value CVE detection scripts")
 	}
 

@@ -124,10 +124,10 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 
 	// Add target and output format
 	args = append(args, config.Target, "-oX", "-", "-v")
-	
+
 	// Log the full Nmap command for debugging
 	fmt.Printf("🔍 Executing Nmap command: nmap %s\n", strings.Join(args, " "))
-	
+
 	cmd := exec.Command("nmap", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
