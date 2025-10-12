@@ -97,15 +97,9 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 		return "vulners", nil
 	}
 
-	// Prepend full path to each script ID for Nmap compatibility
-	// (Older Nmap versions don't support --script-path, so we use absolute paths)
-	var scriptPaths []string
-	for _, scriptID := range scriptIDs {
-		scriptPaths = append(scriptPaths, "/opt/sirius/nse/sirius-nse/scripts/"+scriptID+".nse")
-	}
-
-	// Join script paths with commas
-	scriptList := strings.Join(scriptPaths, ",")
+	// Use script names only (no paths) to avoid duplicate script IDs
+	// Nmap will search its default paths (/usr/local/share/nmap/scripts/)
+	scriptList := strings.Join(scriptIDs, ",")
 
 	// Log the final script count for debugging
 	println("🎯  Vulnerability scan with", len(scriptIDs), "scripts")
