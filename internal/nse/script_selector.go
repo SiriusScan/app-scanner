@@ -97,8 +97,8 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 		return "vulners", nil
 	}
 
-	// Prepend full path to each script ID for Nmap 7.80 compatibility
-	// (Nmap 7.80 doesn't support --script-path, so we use absolute paths)
+	// Prepend full path to each script ID for Nmap compatibility
+	// (Older Nmap versions don't support --script-path, so we use absolute paths)
 	var scriptPaths []string
 	for _, scriptID := range scriptIDs {
 		scriptPaths = append(scriptPaths, "/opt/sirius/nse/sirius-nse/scripts/"+scriptID+".nse")
