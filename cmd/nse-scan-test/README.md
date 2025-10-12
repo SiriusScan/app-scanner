@@ -50,8 +50,8 @@ The default test target is `192.168.123.119`. You can modify this in the code or
 
 The test uses Nmap script arguments from:
 
-- `/app-scanner/scripts/args.txt` (in Docker)
-- `scripts/args.txt` (local development)
+- `/app-scanner/nmap-args/args.txt` (in Docker)
+- `nmap-args/args.txt` (local development)
 
 Example args.txt content:
 

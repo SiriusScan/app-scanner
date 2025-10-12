@@ -77,9 +77,9 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	// Potential script args file locations
 	argsFilePaths := []string{
 		"/opt/sirius/nse/sirius-nse/scripts/args.txt", // Docker NSE path
-		"/app-scanner/scripts/args.txt",               // Docker app-scanner path (production)
-		"/app-scanner-src/scripts/args.txt",           // Docker app-scanner-src path (development)
-		"scripts/args.txt",                            // Local path (relative to working directory)
+		"/app-scanner/nmap-args/args.txt",             // Docker app-scanner path (production)
+		"/app-scanner-src/nmap-args/args.txt",         // Docker app-scanner-src path (development)
+		"nmap-args/args.txt",                          // Local path (relative to working directory)
 	}
 
 	// Find the first args file that exists
