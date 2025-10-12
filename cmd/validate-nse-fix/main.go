@@ -15,7 +15,7 @@ func main() {
 	// Test 1: Script Selector with Wildcard
 	fmt.Println("Test 1: Wildcard Script Selection")
 	fmt.Println("----------------------------------")
-	
+
 	repoManager := nse.NewRepoManager("/opt/sirius/nse/sirius-nse", nse.NSERepoURL)
 	manifest, err := repoManager.GetManifest()
 	if err != nil {
@@ -23,7 +23,7 @@ func main() {
 		log.Println("This is expected if not running in Docker container")
 	} else {
 		selector := nse.NewScriptSelector(manifest)
-		
+
 		// Test wildcard selection
 		scriptFlag, err := selector.BuildNmapScriptFlag("*")
 		if err != nil {
@@ -81,7 +81,7 @@ func countScripts(scriptFlag string) int {
 	if scriptFlag == "" {
 		return 0
 	}
-	
+
 	count := 1
 	for _, char := range scriptFlag {
 		if char == ',' {
@@ -90,4 +90,3 @@ func countScripts(scriptFlag string) int {
 	}
 	return count
 }
-

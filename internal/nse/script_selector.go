@@ -38,7 +38,7 @@ func (s *ScriptSelector) SelectScripts(protocols ...string) []string {
 func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error) {
 	// Directly use script IDs for Nmap rather than full paths
 	var scriptIDs []string
-	
+
 	// Check if this is a wildcard scan (all protocols)
 	isWildcardScan := containsProtocol(protocols, "*")
 
@@ -49,40 +49,40 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 		if isWildcardScan && script.Protocol == "*" {
 			continue
 		}
-		
+
 		// Include scripts that match any of the protocols or have "*" protocol
 		if script.Protocol == "*" || containsProtocol(protocols, script.Protocol) || isWildcardScan {
 			// For wildcard scans, only include scripts from priority protocols
 			if isWildcardScan && !isPriorityProtocol(script.Protocol) {
 				continue
 			}
-			
+
 			// Ensure script ID doesn't have .nse extension
 			scriptID := strings.TrimSuffix(id, ".nse")
 			scriptIDs = append(scriptIDs, scriptID)
 		}
 	}
-	
+
 	// For wildcard scans, add curated essential scripts
 	if isWildcardScan {
 		essentialScripts := []string{
-			"vulners",              // CVE detection
-			"http-title",           // HTTP service identification
-			"http-enum",            // HTTP enumeration
-			"ssh-hostkey",          // SSH key fingerprinting
-			"ssl-cert",             // SSL certificate info
-			"banner",               // Basic banner grabbing
-			"smb-vuln-ms17-010",    // Critical SMB vulnerability
-			"smb-os-discovery",     // SMB OS detection
-			"ftp-anon",             // Anonymous FTP
+			"vulners",           // CVE detection
+			"http-title",        // HTTP service identification
+			"http-enum",         // HTTP enumeration
+			"ssh-hostkey",       // SSH key fingerprinting
+			"ssl-cert",          // SSL certificate info
+			"banner",            // Basic banner grabbing
+			"smb-vuln-ms17-010", // Critical SMB vulnerability
+			"smb-os-discovery",  // SMB OS detection
+			"ftp-anon",          // Anonymous FTP
 		}
-		
+
 		for _, script := range essentialScripts {
 			if !containsScriptID(scriptIDs, script) {
 				scriptIDs = append(scriptIDs, script)
 			}
 		}
-		
+
 		println("🌐 Wildcard scan detected - using curated essential script set")
 	}
 
@@ -104,17 +104,18 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 		scriptIDs = prioritizeScripts(scriptIDs, maxScripts)
 	}
 
-	// Join script IDs with commas
-	scriptList := strings.Join(scriptIDs, ",")
-
-	// Log the final script list for debugging
-	if len(protocols) > 0 && protocols[0] == "smb" {
-		// This is an SMB-specific scan
-		println("🎯 SMB vulnerability scan with", len(scriptIDs), "scripts:", scriptList)
-	} else {
-		// This is a general scan
-		println("🎯 Vulnerability scan with", len(scriptIDs), "scripts")
+	// Prepend full path to each script ID for Nmap 7.80 compatibility
+	// (Nmap 7.80 doesn't support --script-path, so we use absolute paths)
+	var scriptPaths []string
+	for _, scriptID := range scriptIDs {
+		scriptPaths = append(scriptPaths, "/opt/sirius/nse/sirius-nse/scripts/"+scriptID+".nse")
 	}
+
+	// Join script paths with commas
+	scriptList := strings.Join(scriptPaths, ",")
+
+	// Log the final script count for debugging
+	println("🎯  Vulnerability scan with", len(scriptIDs), "scripts")
 
 	return scriptList, nil
 }
@@ -122,14 +123,14 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 // isPriorityProtocol determines if a protocol should be included in wildcard scans
 func isPriorityProtocol(protocol string) bool {
 	priorityProtocols := map[string]bool{
-		"http":  true,
-		"https": true,
-		"ssh":   true,
-		"smb":   true,
-		"ftp":   true,
-		"smtp":  true,
-		"dns":   true,
-		"mysql": true,
+		"http":     true,
+		"https":    true,
+		"ssh":      true,
+		"smb":      true,
+		"ftp":      true,
+		"smtp":     true,
+		"dns":      true,
+		"mysql":    true,
 		"postgres": true,
 	}
 	return priorityProtocols[strings.ToLower(protocol)]
@@ -147,10 +148,10 @@ func prioritizeScripts(scriptIDs []string, maxCount int) []string {
 		"anon",    // Anonymous access
 		"enum",    // Enumeration
 	}
-	
+
 	var priorityScripts []string
 	var otherScripts []string
-	
+
 	// Separate into priority and other
 	for _, scriptID := range scriptIDs {
 		isPriority := false
@@ -161,14 +162,14 @@ func prioritizeScripts(scriptIDs []string, maxCount int) []string {
 				break
 			}
 		}
-		
+
 		if isPriority {
 			priorityScripts = append(priorityScripts, scriptID)
 		} else {
 			otherScripts = append(otherScripts, scriptID)
 		}
 	}
-	
+
 	// Take all priority scripts first, then fill remaining with others
 	result := priorityScripts
 	remaining := maxCount - len(result)
@@ -181,7 +182,7 @@ func prioritizeScripts(scriptIDs []string, maxCount int) []string {
 		// Even priority scripts exceed limit, truncate
 		result = result[:maxCount]
 	}
-	
+
 	return result
 }
 

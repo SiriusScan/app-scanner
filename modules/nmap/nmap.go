@@ -74,35 +74,6 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 		return "", fmt.Errorf("failed to build script flag: %w", err)
 	}
 
-	fmt.Printf("🔍 Script flag: %s\n", scriptFlag)
-
-	// Check if scripts exist and log their content type
-	scriptPaths := []string{
-		"/opt/sirius/nse/sirius-nse/scripts/smb-vuln-ms17-010.nse",
-		"/usr/share/nmap/scripts/smb-vuln-ms17-010.nse",
-	}
-
-	for _, scriptPath := range scriptPaths {
-		if _, err := os.Stat(scriptPath); err == nil {
-			// File exists
-			fmt.Printf("✅ Script exists: %s\n", scriptPath)
-
-			// Read the first 20 bytes to check format
-			data, err := os.ReadFile(scriptPath)
-			if err != nil {
-				fmt.Printf("⚠️ Cannot read script: %s - %v\n", scriptPath, err)
-			} else {
-				preview := string(data)
-				if len(preview) > 30 {
-					preview = preview[:30] + "..."
-				}
-				fmt.Printf("📄 Script preview: %s\n", preview)
-			}
-		} else {
-			fmt.Printf("❌ Script not found: %s\n", scriptPath)
-		}
-	}
-
 	// Potential script args file locations
 	argsFilePaths := []string{
 		"/opt/sirius/nse/sirius-nse/scripts/args.txt", // Docker NSE path
@@ -128,74 +99,31 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	}
 
 	// Determine port specification
-	// For SMB vulnerability scanning, we need to include port 445
-	// but for general scans, we should use a wider port range
 	portSpec := "1-1000" // Default port range
 	if containsAny(protocols, "smb") || strings.Contains(scriptFlag, "smb-vuln") {
 		// When any protocol includes SMB or when using SMB scripts, ensure port 445 is included
 		if len(protocols) > 0 && containsAny(protocols, "*") {
-			// For full scans, use the full range (1-1000 already includes 21-25, 80, 135, 139, 443, 445)
-			// but also include some higher ports like 3389
+			// For full scans, also include some higher ports like RDP
 			portSpec = "1-1000,3389"
-			fmt.Println("🎯 Running full port scan including common ports and RDP")
 		} else {
 			// For targeted SMB scans, focus on common Windows/SMB ports
 			portSpec = "135,139,445,3389"
-			fmt.Println("🎯 Targeting common Windows/SMB ports: 135, 139, 445, 3389")
 		}
-	} else {
-		// Even for general scans, ensure port 445 is included for SMB scans
-		portSpec = "1-1000"
-		fmt.Println("🎯 Using default port range: 1-1000")
 	}
 
 	// Add port specification
 	args = append(args, "-p", portSpec)
 
-	// Add script path to tell Nmap where to find our custom scripts
-	// This is CRITICAL - without this, Nmap only looks in /usr/share/nmap/scripts/
-	nmapScriptPaths := []string{
-		"/opt/sirius/nse/sirius-nse/scripts",     // Primary custom script location
-		"/usr/share/nmap/scripts",                // Default nmap scripts
-	}
-	scriptPathArg := strings.Join(nmapScriptPaths, ":")
-	args = append(args, "--script-path", scriptPathArg)
-	fmt.Printf("📂 Using script paths: %s\n", scriptPathArg)
-
-	// Add script flag - don't hardcode smb-vuln-ms17-010, use the dynamic scriptFlag
+	// Add script flag with absolute paths (Nmap 7.80 doesn't support --script-path)
 	args = append(args, "--script", scriptFlag)
-
-	// Prevent duplicate vulners references
-	if strings.Count(scriptFlag, "vulners") > 1 {
-		// Remove duplicate vulners entries
-		parts := strings.Split(scriptFlag, ",")
-		seen := make(map[string]bool)
-		var unique []string
-
-		for _, part := range parts {
-			trimmed := strings.TrimSpace(part)
-			if !seen[trimmed] {
-				seen[trimmed] = true
-				unique = append(unique, trimmed)
-			}
-		}
-
-		scriptFlag = strings.Join(unique, ",")
-		fmt.Println("🔍 Removed duplicate script entries from flag")
-	}
 
 	// Add script args file if found
 	if argsFilePath != "" {
 		args = append(args, "--script-args-file", argsFilePath)
-		fmt.Printf("📝 Using script args file: %s\n", argsFilePath)
-	} else {
-		fmt.Println("⚠️ No script args file found, using defaults")
 	}
 
 	// Add target and output format
-	args = append(args, config.Target, "-oX", "-", "-v") // Added verbosity flag
-
-	fmt.Printf("🔍 Executing Nmap with args: %v\n", args)
+	args = append(args, config.Target, "-oX", "-", "-v")
 	cmd := exec.Command("nmap", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -203,88 +131,62 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		stderrStr := stderr.String()
-		
+
 		// Check if the error is due to NSE script issues (non-fatal)
 		if strings.Contains(stderrStr, "did not match a category, filename, or directory") ||
 			strings.Contains(stderrStr, "NSE: failed to initialize the script engine") {
 			// Log the script error but don't fail the entire scan
 			fmt.Printf("⚠️  NSE Script Error (non-fatal): %s\n", stderrStr)
-			fmt.Println("🔄 Attempting fallback scan without problematic scripts...")
-			
+			fmt.Println("🔄  Attempting fallback scan without problematic scripts...")
+
 			// Retry with a minimal safe script set
 			return executeFallbackScan(config)
 		}
-		
+
 		// For other errors, return the error
 		return "", fmt.Errorf("error executing Nmap: %w\nStderr: %s", err, stderrStr)
 	}
 
-	// Log raw output for debugging
-	rawOutput := stdout.String()
-	fmt.Println("======== RAW NMAP OUTPUT ========")
-	if len(rawOutput) > 500 {
-		fmt.Println(rawOutput[:500] + "... (truncated)")
-	} else {
-		fmt.Println(rawOutput)
-	}
-	fmt.Println("=================================")
-
-	// Log stderr if not empty
-	stderrOutput := stderr.String()
-	if stderrOutput != "" {
-		fmt.Println("======== NMAP STDERR ========")
-		fmt.Println(stderrOutput)
-		fmt.Println("=============================")
-	}
-
-	return rawOutput, nil
+	return stdout.String(), nil
 }
 
 // executeFallbackScan runs a basic Nmap scan with only safe, essential scripts
 // This is used when the full script scan fails due to script errors
 func executeFallbackScan(config ScanConfig) (string, error) {
 	fmt.Println("🛡️  Running fallback scan with minimal safe scripts...")
-	
+
 	// Build minimal safe command - just version detection and basic info
 	args := []string{
-		"-T4",  // Timing template
-		"-sV",  // Version detection
-		"-Pn",  // Treat all hosts as online
+		"-T4",          // Timing template
+		"-sV",          // Version detection
+		"-Pn",          // Treat all hosts as online
 		"-p", "1-1000", // Standard port range
 	}
-	
-	// Only use the most reliable default scripts
+
+	// Only use the most reliable default scripts with absolute paths
 	safeScripts := []string{
-		"banner",      // Basic banner grabbing
-		"http-title",  // HTTP title detection
-		"ssl-cert",    // SSL certificate info
+		"/usr/share/nmap/scripts/banner.nse",
+		"/usr/share/nmap/scripts/http-title.nse",
+		"/usr/share/nmap/scripts/ssl-cert.nse",
 	}
-	
-	// Add script path
-	scriptPaths := []string{
-		"/opt/sirius/nse/sirius-nse/scripts",
-		"/usr/share/nmap/scripts",
-	}
-	args = append(args, "--script-path", strings.Join(scriptPaths, ":"))
-	
+
 	// Add safe scripts
 	args = append(args, "--script", strings.Join(safeScripts, ","))
-	
+
 	// Add target and output format
 	args = append(args, config.Target, "-oX", "-", "-v")
-	
-	fmt.Printf("🔍 Executing fallback Nmap with args: %v\n", args)
+
 	cmd := exec.Command("nmap", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		// If even the fallback scan fails, return a basic error
 		return "", fmt.Errorf("fallback scan also failed: %w\nStderr: %s", err, stderr.String())
 	}
-	
-	fmt.Println("✅ Fallback scan completed successfully")
+
+	fmt.Println("✅  Fallback scan completed successfully")
 	return stdout.String(), nil
 }
 
