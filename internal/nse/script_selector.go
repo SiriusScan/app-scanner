@@ -42,8 +42,22 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 	// Check if this is a wildcard scan (all protocols)
 	isWildcardScan := containsProtocol(protocols, "*")
 
+	// Track blacklist statistics
+	blacklistCount := 0
+	blacklistReasons := make(map[string]int)
+
 	// For each script in manifest, check if it matches the protocols
 	for id, script := range s.manifest.Scripts {
+		// Ensure script ID doesn't have .nse extension
+		scriptID := strings.TrimSuffix(id, ".nse")
+
+		// Check blacklist first
+		if isBlacklisted, reason := IsBlacklisted(scriptID); isBlacklisted {
+			blacklistCount++
+			blacklistReasons[reason]++
+			continue
+		}
+
 		// Skip wildcard scripts when doing a wildcard scan to avoid overload
 		// We'll add curated scripts instead
 		if isWildcardScan && script.Protocol == "*" {
@@ -57,24 +71,27 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 				continue
 			}
 
-			// Ensure script ID doesn't have .nse extension
-			scriptID := strings.TrimSuffix(id, ".nse")
 			scriptIDs = append(scriptIDs, scriptID)
 		}
 	}
 
-	// For wildcard scans, add curated essential scripts
+	// Log blacklist statistics if any scripts were filtered
+	if blacklistCount > 0 {
+		println("🚫 Filtered", blacklistCount, "blacklisted scripts")
+	}
+
+	// For wildcard scans, add curated essential scripts (blacklist-filtered)
 	if isWildcardScan {
 		essentialScripts := []string{
 			"vulners",           // CVE detection
 			"http-title",        // HTTP service identification
 			"http-enum",         // HTTP enumeration
-			"ssh-hostkey",       // SSH key fingerprinting
 			"ssl-cert",          // SSL certificate info
 			"banner",            // Basic banner grabbing
 			"smb-vuln-ms17-010", // Critical SMB vulnerability
 			"smb-os-discovery",  // SMB OS detection
 			"ftp-anon",          // Anonymous FTP
+			// Note: ssh-hostkey removed - has syntax errors in Nmap 7.95
 		}
 
 		for _, script := range essentialScripts {
