@@ -46,32 +46,33 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 	blacklistCount := 0
 	blacklistReasons := make(map[string]int)
 
-	// For each script in manifest, check if it matches the protocols
-	for id, script := range s.manifest.Scripts {
-		// Ensure script ID doesn't have .nse extension
-		scriptID := strings.TrimSuffix(id, ".nse")
+	// For wildcard scans, skip manifest iteration - we'll use curated essential scripts only
+	if !isWildcardScan {
+		// For each script in manifest, check if it matches the protocols
+		for id, script := range s.manifest.Scripts {
+			// Ensure script ID doesn't have .nse extension
+			scriptID := strings.TrimSuffix(id, ".nse")
 
-		// Check blacklist first
-		if isBlacklisted, reason := IsBlacklisted(scriptID); isBlacklisted {
-			blacklistCount++
-			blacklistReasons[reason]++
-			continue
-		}
-
-		// Skip wildcard scripts when doing a wildcard scan to avoid overload
-		// We'll add curated scripts instead
-		if isWildcardScan && script.Protocol == "*" {
-			continue
-		}
-
-		// Include scripts that match any of the protocols or have "*" protocol
-		if script.Protocol == "*" || containsProtocol(protocols, script.Protocol) || isWildcardScan {
-			// For wildcard scans, only include scripts from priority protocols
-			if isWildcardScan && !isPriorityProtocol(script.Protocol) {
+			// Check blacklist first
+			if isBlacklisted, reason := IsBlacklisted(scriptID); isBlacklisted {
+				blacklistCount++
+				blacklistReasons[reason]++
 				continue
 			}
 
-			scriptIDs = append(scriptIDs, scriptID)
+			// Include scripts that match any of the protocols or have "*" protocol
+			if script.Protocol == "*" || containsProtocol(protocols, script.Protocol) {
+				scriptIDs = append(scriptIDs, scriptID)
+			}
+		}
+	} else {
+		// For wildcard scans, count blacklisted scripts for stats
+		for id, _ := range s.manifest.Scripts {
+			scriptID := strings.TrimSuffix(id, ".nse")
+			if isBlacklisted, reason := IsBlacklisted(scriptID); isBlacklisted {
+				blacklistCount++
+				blacklistReasons[reason]++
+			}
 		}
 	}
 
@@ -80,33 +81,33 @@ func (s *ScriptSelector) BuildNmapScriptFlag(protocols ...string) (string, error
 		println("🚫 Filtered", blacklistCount, "blacklisted scripts")
 	}
 
-	// For wildcard scans, add curated essential scripts (blacklist-filtered)
+	// For wildcard scans, use ONLY high-value CVE detection scripts
+	// This dramatically reduces scan time (206 scripts = 87min, 10 scripts = ~4min)
 	if isWildcardScan {
 		essentialScripts := []string{
-			"vulners",           // CVE detection
-			"http-title",        // HTTP service identification
-			"http-enum",         // HTTP enumeration
-			"ssl-cert",          // SSL certificate info
+			// TOP PRIORITY: CVE Detection
+			"vulners",           // Comprehensive CVE database lookup (HIGHEST VALUE)
+			
+			// Service Identification (needed for context)
 			"banner",            // Basic banner grabbing
-			"smb-vuln-ms17-010", // Critical SMB vulnerability
+			"http-title",        // HTTP service identification
+			"ssl-cert",          // SSL certificate info
+			
+			// Critical Vulnerabilities
+			"smb-vuln-ms17-010", // EternalBlue (critical SMB vulnerability)
+			"http-shellshock",   // Shellshock vulnerability
+			"http-vuln-cve2017-5638", // Apache Struts RCE
+			
+			// Service Discovery
+			"http-enum",         // HTTP path enumeration
 			"smb-os-discovery",  // SMB OS detection
-			"ftp-anon",          // Anonymous FTP
-			// Note: ssh-hostkey removed - has syntax errors in Nmap 7.95
+			"ftp-anon",          // Anonymous FTP access
 		}
 
-		for _, script := range essentialScripts {
-			if !containsScriptID(scriptIDs, script) {
-				scriptIDs = append(scriptIDs, script)
-			}
-		}
-
-		println("🌐 Wildcard scan detected - using curated essential script set")
-	}
-
-	// Always add the SMB vulnerability script for critical security checks
-	const smbScript = "smb-vuln-ms17-010"
-	if !containsScriptID(scriptIDs, smbScript) {
-		scriptIDs = append(scriptIDs, smbScript)
+		// Add all essential scripts to the list
+		scriptIDs = essentialScripts
+		
+		println("🎯 Wildcard scan - using minimal high-value CVE detection scripts")
 	}
 
 	if len(scriptIDs) == 0 {
