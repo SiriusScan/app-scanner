@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,15 +43,15 @@ type Target struct {
 	Timeout int        `json:"timeout,omitempty"` // Optional timeout in seconds
 }
 
-// Update ScanOptions struct to include all template fields
+// ScanOptions struct for scan configuration
 type ScanOptions struct {
-	Template     ScanTemplate `json:"template"`      // Scan template to use
-	PortRange    string       `json:"port_range"`    // Port range to scan
-	Aggressive   bool         `json:"aggressive"`    // Whether to use aggressive scanning
-	ExcludePorts []string     `json:"exclude_ports"` // Ports to exclude
-	ScanTypes    []string     `json:"scan_types"`    // Types of scans to perform
-	MaxRetries   int          `json:"max_retries"`   // Maximum number of retries
-	Parallel     bool         `json:"parallel"`      // Whether to scan targets in parallel
+	TemplateID   string   `json:"template_id"`   // Template ID to use for scan
+	PortRange    string   `json:"port_range"`    // Port range to scan
+	Aggressive   bool     `json:"aggressive"`    // Whether to use aggressive scanning
+	ExcludePorts []string `json:"exclude_ports"` // Ports to exclude
+	ScanTypes    []string `json:"scan_types"`    // Types of scans to perform
+	MaxRetries   int      `json:"max_retries"`   // Maximum number of retries
+	Parallel     bool     `json:"parallel"`      // Whether to scan targets in parallel
 }
 
 // ScanMessage represents the incoming scan request message
@@ -70,12 +71,13 @@ type ScanManager struct {
 	currentScanID      string
 	currentScanOptions ScanOptions
 	nseSync            *nse.SyncManager
+	templateManager    *TemplateManager
 	scanStrategies     map[string]ScanStrategy
 	options            *ScanOptions
 	toolFactory        *ScanToolFactory
 	scanUpdater        *ScanUpdater
 	kvStore            store.KVStore
-	apiBaseURL         string // API base URL for source-aware submissions
+	apiBaseURL         string         // API base URL for source-aware submissions
 	logger             *LoggingClient // Centralized logging client
 }
 
@@ -96,6 +98,9 @@ func NewScanManager(kvStore store.KVStore, toolFactory *ScanToolFactory, updater
 	// Initialize NSE sync manager
 	syncManager := nse.NewSyncManager(repoManager, kvStore)
 
+	// Initialize template manager
+	templateManager := NewTemplateManager(kvStore)
+
 	// Get API base URL from environment or use default
 	apiBaseURL := os.Getenv("SIRIUS_API_URL")
 	if apiBaseURL == "" {
@@ -103,14 +108,15 @@ func NewScanManager(kvStore store.KVStore, toolFactory *ScanToolFactory, updater
 	}
 
 	sm := &ScanManager{
-		kvStore:     kvStore,
-		toolFactory: toolFactory,
-		scanUpdater: updater,
-		ctx:         ctx,
-		cancel:      cancel,
-		nseSync:     syncManager,
-		apiBaseURL:  apiBaseURL,
-		logger:      NewLoggingClient(),
+		kvStore:         kvStore,
+		toolFactory:     toolFactory,
+		scanUpdater:     updater,
+		ctx:             ctx,
+		cancel:          cancel,
+		nseSync:         syncManager,
+		templateManager: templateManager,
+		apiBaseURL:      apiBaseURL,
+		logger:          NewLoggingClient(),
 		scanStrategies: map[string]ScanStrategy{
 			"discovery": &RustScanStrategy{},
 			"nmap":      &NmapStrategy{},
@@ -221,8 +227,8 @@ func (sm *ScanManager) createScanSource(toolName string) models.ScanSource {
 	if len(sm.currentScanOptions.ExcludePorts) > 0 {
 		configParts = append(configParts, fmt.Sprintf("exclude:%s", strings.Join(sm.currentScanOptions.ExcludePorts, ",")))
 	}
-	if sm.currentScanOptions.Template != "" {
-		configParts = append(configParts, fmt.Sprintf("template:%s", sm.currentScanOptions.Template))
+	if sm.currentScanOptions.TemplateID != "" {
+		configParts = append(configParts, fmt.Sprintf("template:%s", sm.currentScanOptions.TemplateID))
 	}
 
 	// System information for audit trail
@@ -290,10 +296,15 @@ func (sm *ScanManager) ListenForScans() {
 		log.Printf("Warning: failed to sync NSE scripts: %v", err)
 	}
 
+	// Initialize system templates
+	if err := sm.templateManager.InitializeSystemTemplates(sm.ctx); err != nil {
+		log.Printf("Warning: failed to initialize system templates: %v", err)
+	}
+
 	queue.Listen("scan", sm.handleMessage)
 }
 
-// Update handleMessage to use DefaultTemplates
+// handleMessage processes incoming scan requests
 func (sm *ScanManager) handleMessage(msg string) {
 	var scanMsg ScanMessage
 	if err := json.Unmarshal([]byte(msg), &scanMsg); err != nil {
@@ -307,38 +318,40 @@ func (sm *ScanManager) handleMessage(msg string) {
 	sm.logger.LogScanEvent(scanMsg.ID, "scan_initiated", "Scan request received", map[string]interface{}{
 		"targets_count": len(scanMsg.Targets),
 		"priority":      scanMsg.Priority,
-		"template":      scanMsg.Options.Template,
+		"template_id":   scanMsg.Options.TemplateID,
 		"scan_types":    scanMsg.Options.ScanTypes,
 	})
 
-	// Apply template defaults
-	if defaults, ok := DefaultTemplates[scanMsg.Options.Template]; ok {
-		options := defaults // Start with template defaults
-
-		// Only override if explicitly set in request
-		if scanMsg.Options.PortRange != "" {
-			options.PortRange = scanMsg.Options.PortRange
-		}
-		if len(scanMsg.Options.ExcludePorts) > 0 {
-			options.ExcludePorts = scanMsg.Options.ExcludePorts
-		}
-		if len(scanMsg.Options.ScanTypes) > 0 {
-			options.ScanTypes = scanMsg.Options.ScanTypes
-		}
-		if scanMsg.Options.MaxRetries > 0 {
-			options.MaxRetries = scanMsg.Options.MaxRetries
+	// Resolve template if template ID provided
+	if scanMsg.Options.TemplateID != "" {
+		template, err := sm.templateManager.GetTemplate(sm.ctx, scanMsg.Options.TemplateID)
+		if err != nil {
+			log.Printf("Failed to get template '%s': %v", scanMsg.Options.TemplateID, err)
+			sm.logger.LogScanError(scanMsg.ID, "template_resolution", "template_not_found", "Failed to resolve template", err)
+			return
 		}
 
-		// Convert back to ScanOptions
-		scanMsg.Options = ScanOptions{
-			Template:     scanMsg.Options.Template,
-			ScanTypes:    options.ScanTypes,
-			PortRange:    options.PortRange,
-			ExcludePorts: options.ExcludePorts,
-			Aggressive:   options.Aggressive,
-			MaxRetries:   options.MaxRetries,
-			Parallel:     options.Parallel,
+		// Apply template options (user-provided options override template defaults)
+		if scanMsg.Options.PortRange == "" {
+			scanMsg.Options.PortRange = template.ScanOptions.PortRange
 		}
+		if len(scanMsg.Options.ScanTypes) == 0 {
+			scanMsg.Options.ScanTypes = template.ScanOptions.ScanTypes
+		}
+		if len(scanMsg.Options.ExcludePorts) == 0 {
+			scanMsg.Options.ExcludePorts = template.ScanOptions.ExcludePorts
+		}
+		if scanMsg.Options.MaxRetries == 0 {
+			scanMsg.Options.MaxRetries = template.ScanOptions.MaxRetries
+		}
+		if !scanMsg.Options.Aggressive {
+			scanMsg.Options.Aggressive = template.ScanOptions.Aggressive
+		}
+		if !scanMsg.Options.Parallel {
+			scanMsg.Options.Parallel = template.ScanOptions.Parallel
+		}
+
+		log.Printf("Resolved template '%s': %s", template.ID, template.Name)
 	}
 
 	// Continue with validation and processing
@@ -391,23 +404,24 @@ func (sm *ScanManager) processTarget(target Target) {
 
 	// Log target preparation success
 	sm.logger.LogScanEvent(sm.currentScanID, "target_prepared", "Target prepared successfully", map[string]interface{}{
-		"target_value": target.Value,
-		"target_type":  target.Type,
+		"target_value":  target.Value,
+		"target_type":   target.Type,
 		"ips_generated": len(targetIPs),
-		"ips":          targetIPs,
+		"ips":           targetIPs,
 	})
 
 	// Add each IP as a task to the worker pool
+	log.Printf("Adding %d IPs to worker pool (scan types: %v, port range: %s)", len(targetIPs), sm.currentScanOptions.ScanTypes, sm.currentScanOptions.PortRange)
 	for _, ip := range targetIPs {
 		task := ScanTask{
 			IP:      ip,
-			Options: sm.currentScanOptions, // You'll need to add this field to ScanManager
+			Options: sm.currentScanOptions,
 		}
 		sm.workerPool.AddTask(task)
 	}
 }
 
-// scanIP performs the actual scanning of a single IP
+// scanIP performs the actual scanning of a single IP using a sequential pipeline
 func (sm *ScanManager) scanIP(ip string) {
 	// Validate if this is a single IP before proceeding
 	if net.ParseIP(ip) == nil {
@@ -415,48 +429,100 @@ func (sm *ScanManager) scanIP(ip string) {
 		return
 	}
 
-	// Only run enabled scan types
-	for _, scanType := range sm.currentScanOptions.ScanTypes {
-		switch scanType {
-		case "enumeration":
-			if err := sm.runEnumeration(ip); err != nil {
-				log.Printf("Enumeration failed for %s: %v", ip, err)
-			}
-		case "discovery":
-			if err := sm.runDiscovery(ip); err != nil {
-				log.Printf("Discovery failed for %s: %v", ip, err)
-			}
-		case "vulnerability":
-			if err := sm.runVulnerability(ip); err != nil {
-				log.Printf("Vulnerability scan failed for %s: %v", ip, err)
-			}
+	log.Printf("🚀 Starting scan pipeline for %s (types: %v, template ports: %s)",
+		ip, sm.currentScanOptions.ScanTypes, sm.currentScanOptions.PortRange)
+
+	var discoveredPorts []int
+
+	// PHASE 1: Port Discovery (RustScan - fast, broad discovery)
+	if contains(sm.currentScanOptions.ScanTypes, "discovery") {
+		log.Printf("📡 Phase 1: Discovery scan on %s", ip)
+		ports, err := sm.runDiscovery(ip)
+		if err != nil {
+			log.Printf("Discovery failed for %s: %v", ip, err)
+		} else if len(ports) > 0 {
+			discoveredPorts = ports
+			log.Printf("✅ Discovery found %d ports on %s: %v", len(ports), ip, ports)
+		} else {
+			log.Printf("⚠️  Discovery found no open ports on %s", ip)
 		}
 	}
+
+	// PHASE 2: Port Enumeration (Naabu - detailed, accurate enumeration)
+	if contains(sm.currentScanOptions.ScanTypes, "enumeration") {
+		log.Printf("🔍 Phase 2: Enumeration scan on %s", ip)
+		ports, err := sm.runEnumeration(ip)
+		if err != nil {
+			log.Printf("Enumeration failed for %s: %v", ip, err)
+		} else if len(ports) > 0 {
+			// Merge with discovery results (union of both)
+			if len(discoveredPorts) == 0 {
+				discoveredPorts = ports
+			} else {
+				// Simple merge - could be improved with deduplication
+				discoveredPorts = append(discoveredPorts, ports...)
+			}
+			log.Printf("✅ Enumeration found %d ports on %s: %v", len(ports), ip, ports)
+		} else {
+			log.Printf("⚠️  Enumeration found no ports on %s", ip)
+		}
+	}
+
+	// PHASE 3: Vulnerability Scanning (Nmap - uses discovered ports ONLY)
+	if contains(sm.currentScanOptions.ScanTypes, "vulnerability") {
+		log.Printf("🎯 Phase 3: Vulnerability scan on %s", ip)
+
+		// Determine which ports to scan
+		var portList string
+		if len(discoveredPorts) > 0 {
+			// Use discovered ports from discovery/enumeration
+			portList = portsToString(discoveredPorts)
+			log.Printf("🎯 Using %d discovered ports: %s", len(discoveredPorts), portList)
+		} else if sm.currentScanOptions.PortRange != "" {
+			// Fallback to template port range if no ports discovered
+			portList = sm.currentScanOptions.PortRange
+			log.Printf("⚠️  No ports discovered, falling back to template port_range: %s", portList)
+		} else {
+			// No ports discovered and no template range - skip
+			log.Printf("⚠️  No ports discovered and no port_range specified - skipping vulnerability scan for %s", ip)
+			log.Printf("Scan completed for %s", ip)
+			return
+		}
+
+		// Run vulnerability scan with specific ports
+		if err := sm.runVulnerabilityWithPorts(ip, portList); err != nil {
+			log.Printf("Vulnerability scan failed for %s: %v", ip, err)
+		} else {
+			log.Printf("✅ Vulnerability scan completed for %s", ip)
+		}
+	}
+
+	log.Printf("✅ Scan pipeline completed for %s", ip)
 }
 
 // markHostComplete updates the scan status for a completed host
 func (sm *ScanManager) markHostComplete(ip string) error {
 	return sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
 		scan.HostsCompleted++
-		
+
 		// Log host completion
 		sm.logger.LogScanEvent(sm.currentScanID, "host_completed", "Host scan completed", map[string]interface{}{
-			"host_ip":          ip,
-			"hosts_completed":  scan.HostsCompleted,
-			"total_hosts":      len(scan.Hosts),
+			"host_ip":         ip,
+			"hosts_completed": scan.HostsCompleted,
+			"total_hosts":     len(scan.Hosts),
 		})
-		
+
 		// If all hosts are processed, mark scan as complete
 		if scan.HostsCompleted >= len(scan.Hosts) {
 			scan.Status = "completed"
 			scan.EndTime = time.Now().Format(time.RFC3339)
-			
+
 			// Log scan completion
 			sm.logger.LogScanCompletion(sm.currentScanID, "all_targets", map[string]interface{}{
-				"total_hosts":      len(scan.Hosts),
-				"hosts_completed":  scan.HostsCompleted,
+				"total_hosts":           len(scan.Hosts),
+				"hosts_completed":       scan.HostsCompleted,
 				"vulnerabilities_found": len(scan.Vulnerabilities),
-				"scan_duration":    time.Since(time.Now()).String(), // This will be calculated properly in real implementation
+				"scan_duration":         time.Since(time.Now()).String(), // This will be calculated properly in real implementation
 			})
 		}
 		return nil
@@ -464,27 +530,29 @@ func (sm *ScanManager) markHostComplete(ip string) error {
 }
 
 // runEnumeration performs the enumeration scan
-func (sm *ScanManager) runEnumeration(ip string) error {
+func (sm *ScanManager) runEnumeration(ip string) ([]int, error) {
 	startTime := time.Now()
 	enumStrategy := sm.toolFactory.CreateTool("enumeration")
 	enumResults, err := enumStrategy.Execute(ip)
 	duration := time.Since(startTime)
-	
+
 	if err != nil {
 		sm.logger.LogToolExecution(sm.currentScanID, ip, "naabu", duration, false, map[string]interface{}{
 			"error": err.Error(),
 		})
-		return fmt.Errorf("port enumeration failed for %s: %v", ip, err)
+		return nil, fmt.Errorf("port enumeration failed for %s: %v", ip, err)
+	}
+
+	// Extract enumerated ports
+	enumeratedPorts := make([]int, len(enumResults.Ports))
+	for i, port := range enumResults.Ports {
+		enumeratedPorts[i] = port.Number
 	}
 
 	// Log tool execution success
-	enumPorts := make([]int, len(enumResults.Ports))
-	for i, port := range enumResults.Ports {
-		enumPorts[i] = port.ID
-	}
 	sm.logger.LogToolExecution(sm.currentScanID, ip, "naabu", duration, true, map[string]interface{}{
-		"ports_found": len(enumResults.Ports),
-		"ports":       enumPorts,
+		"ports_found": len(enumeratedPorts),
+		"ports":       enumeratedPorts,
 	})
 
 	// Submit host data to database if ports were found
@@ -513,11 +581,11 @@ func (sm *ScanManager) runEnumeration(ip string) error {
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("failed to update scan with enumeration results for host %s: %v", ip, err)
+		return nil, fmt.Errorf("failed to update scan with enumeration results for host %s: %v", ip, err)
 	}
 
 	log.Printf("Enumeration results: %+v", enumResults)
-	return nil // Remove markHostComplete call
+	return enumeratedPorts, nil // Return enumerated ports for pipeline
 }
 
 // Helper function to check if a slice contains a string
@@ -530,47 +598,54 @@ func contains(slice []string, str string) bool {
 	return false
 }
 
-// runDiscovery performs the discovery scan
-func (sm *ScanManager) runDiscovery(ip string) error {
+// portsToString converts []int{80, 443, 445} to "80,443,445"
+func portsToString(ports []int) string {
+	strPorts := make([]string, len(ports))
+	for i, port := range ports {
+		strPorts[i] = strconv.Itoa(port)
+	}
+	return strings.Join(strPorts, ",")
+}
+
+// runDiscovery performs the discovery scan and returns discovered ports
+func (sm *ScanManager) runDiscovery(ip string) ([]int, error) {
 	startTime := time.Now()
 	discoveryStrategy := sm.toolFactory.CreateTool("discovery")
 	discoveryResults, err := discoveryStrategy.Execute(ip)
 	duration := time.Since(startTime)
-	
+
 	if err != nil {
 		sm.logger.LogToolExecution(sm.currentScanID, ip, "rustscan", duration, false, map[string]interface{}{
 			"error": err.Error(),
 		})
-		return fmt.Errorf("discovery scan failed for %s: %v", ip, err)
+		return nil, fmt.Errorf("discovery scan failed for %s: %v", ip, err)
 	}
 
 	log.Printf("Discovery scan completed for %s. Found %d ports.", ip, len(discoveryResults.Ports))
 
-	// Log tool execution success
-	toolPorts := make([]int, len(discoveryResults.Ports))
+	// Extract discovered ports
+	discoveredPorts := make([]int, len(discoveryResults.Ports))
 	for i, port := range discoveryResults.Ports {
-		toolPorts[i] = port.ID
+		discoveredPorts[i] = port.Number
 	}
+
+	// Log tool execution success
 	sm.logger.LogToolExecution(sm.currentScanID, ip, "rustscan", duration, true, map[string]interface{}{
-		"ports_found": len(discoveryResults.Ports),
-		"ports":       toolPorts,
+		"ports_found": len(discoveredPorts),
+		"ports":       discoveredPorts,
 	})
 
 	// Only persist host if at least one port is found
-	if len(discoveryResults.Ports) == 0 {
+	if len(discoveredPorts) == 0 {
 		log.Printf("No open ports found for %s, not persisting host.", discoveryResults.IP)
 		sm.logger.LogScanEvent(sm.currentScanID, "no_ports_found", "No open ports found for host", map[string]interface{}{
 			"host_ip": ip,
 		})
-		return nil
+		return nil, nil // No ports found, but not an error
 	}
 
 	// Log host discovery
-	discoveryPorts := make([]int, len(discoveryResults.Ports))
-	for i, port := range discoveryResults.Ports {
-		discoveryPorts[i] = port.ID
-	}
-	sm.logger.LogHostDiscovery(sm.currentScanID, ip, discoveryPorts, "rustscan")
+	sm.logger.LogHostDiscovery(sm.currentScanID, ip, discoveredPorts, "rustscan")
 
 	// Determine the actual tool used based on scan type - discovery uses RustScan
 	toolName := "rustscan"
@@ -597,16 +672,55 @@ func (sm *ScanManager) runDiscovery(ip string) error {
 		// Still continue with the scan
 	}
 
-	return nil
+	return discoveredPorts, nil // Return discovered ports for pipeline
 }
 
 // runVulnerability performs the vulnerability scan
 func (sm *ScanManager) runVulnerability(ip string) error {
+	return sm.runVulnerabilityWithPorts(ip, "")
+}
+
+// runVulnerabilityWithPorts performs vulnerability scan with optional port override
+func (sm *ScanManager) runVulnerabilityWithPorts(ip string, portList string) error {
 	startTime := time.Now()
+
+	// Override port range if specified (for discovered ports pipeline)
+	originalPortRange := sm.currentScanOptions.PortRange
+	if portList != "" {
+		sm.currentScanOptions.PortRange = portList
+		log.Printf("🎯 Overriding port range for %s: %s → %s", ip, originalPortRange, portList)
+	}
+	// Restore original port range when done
+	defer func() {
+		if portList != "" {
+			sm.currentScanOptions.PortRange = originalPortRange
+		}
+	}()
+
+	// Get script list from template if template ID is provided
+	var scriptList []string
+	if sm.currentScanOptions.TemplateID != "" {
+		scripts, err := sm.templateManager.ResolveScripts(sm.ctx, sm.currentScanOptions.TemplateID)
+		if err != nil {
+			log.Printf("Warning: failed to resolve scripts from template: %v", err)
+		} else {
+			scriptList = scripts
+			log.Printf("Resolved %d scripts from template '%s'", len(scriptList), sm.currentScanOptions.TemplateID)
+		}
+	}
+
+	// Create vulnerability tool with script list
 	vulnStrategy := sm.toolFactory.CreateTool("vulnerability")
+
+	// If we have an nmap strategy and scripts, set the script list
+	if nmapStrat, ok := vulnStrategy.(*NmapStrategy); ok && len(scriptList) > 0 {
+		nmapStrat.ScriptList = scriptList
+		log.Printf("Configured Nmap strategy with %d scripts and port range: %s", len(scriptList), nmapStrat.PortRange)
+	}
+
 	vulnResults, err := vulnStrategy.Execute(ip)
 	duration := time.Since(startTime)
-	
+
 	if err != nil {
 		sm.logger.LogToolExecution(sm.currentScanID, ip, "nmap", duration, false, map[string]interface{}{
 			"error": err.Error(),
