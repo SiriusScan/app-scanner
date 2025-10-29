@@ -200,7 +200,7 @@ func extractScriptContent(content string) string {
 func (sm *SyncManager) syncScriptContent(id string, script Script) error {
 	// Get script content from ValKey first (highest priority)
 	globalContent, err := sm.getScriptContent(context.Background(), id)
-	if err != nil && err.Error() != "key not found" {
+	if err != nil && !strings.Contains(err.Error(), "not found") {
 		return fmt.Errorf("failed to get script content from ValKey: %w", err)
 	}
 
