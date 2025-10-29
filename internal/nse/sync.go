@@ -109,7 +109,8 @@ func (sm *SyncManager) Sync(ctx context.Context) error {
 		// Get ValKey manifest (global source of truth)
 		globalManifest, err := sm.getValKeyManifest(ctx)
 		if err != nil {
-			if err.Error() == "key not found" {
+			// Check for key not found errors
+			if strings.Contains(err.Error(), "not found") {
 				// If no global manifest exists, initialize it with local manifest
 				fmt.Printf("📝 No manifest found in ValKey, initializing with local manifest: %s\n", localManifest.Name)
 				if err := sm.updateValKeyManifest(ctx, localManifest); err != nil {
