@@ -88,10 +88,15 @@ func (sm *SyncManager) Sync(ctx context.Context) error {
 		repoPath := filepath.Join(sm.repoManager.BasePath, "..", repo.Name)
 		repoManager := NewRepoManager(repoPath, repo.URL)
 
-		// Ensure repository is cloned and up to date
-		if err := repoManager.EnsureRepo(); err != nil {
-			log.Printf("Warning: failed to ensure repository %s: %v", repo.Name, err)
-			continue
+		// Check if repository already exists and has a manifest (development/volume mount scenario)
+		if repoManager.isGitRepo() {
+			log.Printf("Repository %s already exists, using local copy", repo.Name)
+		} else {
+			// Ensure repository is cloned (production scenario)
+			if err := repoManager.EnsureRepo(); err != nil {
+				log.Printf("Warning: failed to ensure repository %s: %v", repo.Name, err)
+				continue
+			}
 		}
 
 		// Get local manifest from repository
