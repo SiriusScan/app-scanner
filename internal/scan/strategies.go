@@ -29,24 +29,37 @@ func (r *RustScanStrategy) Execute(target string) (sirius.Host, error) {
 
 // NmapStrategy implements vulnerability scanning using Nmap.
 type NmapStrategy struct {
-	Protocols []string
+	Protocols  []string // Deprecated: use ScriptList
+	ScriptList []string // Explicit list of scripts to run
+	PortRange  string   // Port range to scan (from template)
 }
 
 // Execute performs the vulnerability scan using Nmap and expands vulnerability details.
 func (n *NmapStrategy) Execute(target string) (sirius.Host, error) {
 	log.Printf("Starting vulnerability scan on target: %s", target)
 
-	// Create a scan config with protocols if they're available
+	// Create a scan config
 	config := nmap.ScanConfig{
-		Target: target,
+		Target:    target,
+		PortRange: n.PortRange, // Pass port range from template
 	}
 
-	// Add protocols if available
-	if len(n.Protocols) > 0 {
+	// Use explicit script list if provided, otherwise fall back to protocols
+	if len(n.ScriptList) > 0 {
+		config.ScriptList = n.ScriptList
+		log.Printf("Using explicit script list with %d scripts", len(n.ScriptList))
+	} else if len(n.Protocols) > 0 {
 		config.Protocols = n.Protocols
+		log.Printf("Using protocol-based script selection: %v", n.Protocols)
 	} else {
 		// Default to all protocols
 		config.Protocols = []string{"*"}
+		log.Printf("Using default wildcard scan")
+	}
+
+	// Log port range being used
+	if n.PortRange != "" {
+		log.Printf("Using template port range: %s", n.PortRange)
 	}
 
 	results, err := nmap.ScanWithConfig(config)

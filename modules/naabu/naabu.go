@@ -48,7 +48,7 @@ func scanImpl(target string, config ScanConfig) (sirius.Host, error) {
 		OnResult: func(hr *result.HostResult) {
 			for _, p := range hr.Ports {
 				results = append(results, sirius.Port{
-					ID:       p.Port,
+					Number:   p.Port,
 					Protocol: "tcp",
 					State:    "open",
 				})

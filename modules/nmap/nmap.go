@@ -17,8 +17,10 @@ import (
 
 // ScanConfig holds configuration for the Nmap scan
 type ScanConfig struct {
-	Target    string   // Target to scan
-	Protocols []string // Protocols to select scripts for
+	Target     string   // Target to scan
+	Protocols  []string // Protocols to select scripts for (deprecated, use ScriptList)
+	ScriptList []string // Explicit list of scripts to run (overrides Protocols)
+	PortRange  string   // Explicit port range (e.g., "1-1000", "80,443,3389")
 }
 
 // Scan is a function variable that can be overridden for testing.
@@ -50,28 +52,52 @@ func ScanWithConfig(config ScanConfig) (sirius.Host, error) {
 }
 
 func executeNmapWithConfig(config ScanConfig) (string, error) {
-	// Get script selector
-	repoManager := nse.NewRepoManager("/opt/sirius/nse/sirius-nse", nse.NSERepoURL)
-	manifest, err := repoManager.GetManifest()
-	if err != nil {
-		return "", fmt.Errorf("failed to get NSE manifest: %w", err)
-	}
+	var scriptFlag string
+	var protocols []string
 
-	scriptSelector := nse.NewScriptSelector(manifest)
-
-	// Add SMB protocol if we have any protocols and port 445 is likely to be scanned
-	protocols := append([]string{}, config.Protocols...)
-	if len(protocols) > 0 && (containsAny(protocols, "smb") || containsAny(protocols, "*")) {
-		// Add "smb" if not already included and we're doing a focused scan
-		if !containsAny(protocols, "smb") && !containsAny(protocols, "*") {
-			protocols = append(protocols, "smb")
-			fmt.Println("🔄 Added SMB protocol for script selection")
+	// Use explicit script list if provided, otherwise use protocol-based selection
+	if len(config.ScriptList) > 0 {
+		// Direct script list provided (from template)
+		if len(config.ScriptList) == 1 && config.ScriptList[0] == "*" {
+			// Special case: wildcard means all scripts
+			// Get script selector to build full script list
+			repoManager := nse.NewRepoManager("/opt/sirius/nse/sirius-nse", nse.NSERepoURL)
+			manifest, err := repoManager.GetManifest()
+			if err != nil {
+				return "", fmt.Errorf("failed to get NSE manifest: %w", err)
+			}
+			scriptSelector := nse.NewScriptSelector(manifest)
+			var err2 error
+			scriptFlag, err2 = scriptSelector.BuildNmapScriptFlag("*")
+			if err2 != nil {
+				return "", fmt.Errorf("failed to build script flag: %w", err2)
+			}
+			protocols = []string{"*"}
+		} else {
+			// Use provided script list directly
+			scriptFlag = strings.Join(config.ScriptList, ",")
+			fmt.Printf("🎯 Using template script list: %d scripts\n", len(config.ScriptList))
+			// Infer protocols from script list for port selection
+			protocols = inferProtocolsFromScripts(config.ScriptList)
 		}
-	}
+	} else {
+		// Legacy protocol-based selection
+		repoManager := nse.NewRepoManager("/opt/sirius/nse/sirius-nse", nse.NSERepoURL)
+		manifest, err := repoManager.GetManifest()
+		if err != nil {
+			return "", fmt.Errorf("failed to get NSE manifest: %w", err)
+		}
 
-	scriptFlag, err := scriptSelector.BuildNmapScriptFlag(protocols...)
-	if err != nil {
-		return "", fmt.Errorf("failed to build script flag: %w", err)
+		scriptSelector := nse.NewScriptSelector(manifest)
+
+		// Use protocols as-is - no protocol-specific logic
+		protocols = append([]string{}, config.Protocols...)
+
+		var err2 error
+		scriptFlag, err2 = scriptSelector.BuildNmapScriptFlag(protocols...)
+		if err2 != nil {
+			return "", fmt.Errorf("failed to build script flag: %w", err2)
+		}
 	}
 
 	// Potential script args file locations
@@ -98,21 +124,13 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 		"-Pn", // Treat all hosts as online
 	}
 
-	// Determine port specification
-	portSpec := "1-1000" // Default port range
-	if containsAny(protocols, "smb") || strings.Contains(scriptFlag, "smb-vuln") {
-		// When any protocol includes SMB or when using SMB scripts, ensure port 445 is included
-		if len(protocols) > 0 && containsAny(protocols, "*") {
-			// For full scans, also include some higher ports like RDP
-			portSpec = "1-1000,3389"
-		} else {
-			// For targeted SMB scans, focus on common Windows/SMB ports
-			portSpec = "135,139,445,3389"
-		}
+	// Port specification MUST be provided (from discovered ports or template)
+	if config.PortRange == "" {
+		return "", fmt.Errorf("no port range specified - vulnerability scanning requires explicit ports from discovery or template")
 	}
 
-	// Add port specification
-	args = append(args, "-p", portSpec)
+	fmt.Printf("📌 Using port range: %s\n", config.PortRange)
+	args = append(args, "-p", config.PortRange)
 
 	// Add script flag (Nmap will use sirius-nse scripts via symlink)
 	args = append(args, "--script", scriptFlag)
@@ -243,7 +261,7 @@ func processNmapOutput(output string) (sirius.Host, error) {
 	var services []sirius.Service
 	for _, port := range nmapHost.Ports {
 		p := sirius.Port{
-			ID:       port.PortId,
+			Number:   port.PortId,
 			Protocol: port.Protocol,
 			State:    port.State.State,
 		}
@@ -461,4 +479,40 @@ func containsAny(list []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// inferProtocolsFromScripts infers protocols from a list of script names
+// This helps with port selection based on the scripts being run
+func inferProtocolsFromScripts(scripts []string) []string {
+	protocolSet := make(map[string]bool)
+
+	for _, script := range scripts {
+		scriptLower := strings.ToLower(script)
+
+		// Check for common protocol indicators in script names
+		if strings.Contains(scriptLower, "smb") {
+			protocolSet["smb"] = true
+		}
+		if strings.Contains(scriptLower, "http") {
+			protocolSet["http"] = true
+		}
+		if strings.Contains(scriptLower, "ssh") {
+			protocolSet["ssh"] = true
+		}
+		if strings.Contains(scriptLower, "ftp") {
+			protocolSet["ftp"] = true
+		}
+		if strings.Contains(scriptLower, "rdp") || strings.Contains(scriptLower, "3389") {
+			protocolSet["rdp"] = true
+		}
+	}
+
+	// Convert set to slice
+	protocols := make([]string, 0, len(protocolSet))
+	for protocol := range protocolSet {
+		protocols = append(protocols, protocol)
+	}
+
+	// If no specific protocols found, return empty (will use default port range)
+	return protocols
 }

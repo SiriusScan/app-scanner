@@ -52,9 +52,9 @@ func (wp *WorkerPool) AddTask(task ScanTask) {
 // worker processes tasks from the pool
 func (wp *WorkerPool) worker(ctx context.Context, id int) {
 	defer wp.wg.Done()
-	
+
 	log.Printf("Worker %d started", id)
-	
+
 	for {
 		select {
 		case task, ok := <-wp.tasks:
@@ -62,13 +62,13 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 				log.Printf("Worker %d shutting down", id)
 				return
 			}
-			
+
 			// Process the task
 			wp.manager.scanIP(task.IP)
-			
+
 		case <-ctx.Done():
 			log.Printf("Worker %d context cancelled", id)
 			return
 		}
 	}
-} 
+}

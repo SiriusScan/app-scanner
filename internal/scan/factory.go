@@ -26,9 +26,10 @@ func (f *ScanToolFactory) CreateTool(toolType string) ScanStrategy {
 	case "discovery":
 		return &RustScanStrategy{}
 	case "vulnerability":
-		// Create NmapStrategy with protocols
+		// Create NmapStrategy with protocols and port range
 		nmapStrategy := &NmapStrategy{
-			Protocols: []string{"*"}, // Default to all protocols
+			Protocols: []string{"*"},              // Default to all protocols
+			PortRange: f.currentOptions.PortRange, // Pass port range from template
 		}
 
 		// Check if SMB scanning is requested

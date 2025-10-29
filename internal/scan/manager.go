@@ -93,7 +93,7 @@ func NewScanManager(kvStore store.KVStore, toolFactory *ScanToolFactory, updater
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize NSE repository manager
-	repoManager := nse.NewRepoManager("/opt/sirius/nse/sirius-nse", nse.NSERepoURL)
+	repoManager := nse.NewRepoManager("/sirius-nse", nse.NSERepoURL)
 
 	// Initialize NSE sync manager
 	syncManager := nse.NewSyncManager(repoManager, kvStore)

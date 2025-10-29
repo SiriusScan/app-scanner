@@ -38,7 +38,8 @@ func (sm *SyncManager) loadRepositories(ctx context.Context) (*RepositoryList, e
 	// Try to get repository list from ValKey first
 	resp, err := sm.kvStore.GetValue(ctx, ValKeyRepoManifestKey)
 	if err != nil {
-		if strings.Contains(err.Error(), "valkey nil message") {
+		// Check for key not found errors (valkey nil message or "not found")
+		if strings.Contains(err.Error(), "valkey nil message") || strings.Contains(err.Error(), "not found") {
 			// Load built-in repository list
 			log.Printf("No repository manifest found in ValKey, loading built-in manifest")
 			builtInList, err := LoadRepositoryList("internal/nse/manifest.json")

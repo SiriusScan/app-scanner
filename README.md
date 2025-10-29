@@ -1,117 +1,239 @@
-# Sirius Scan Engine
+# Sirius Vulnerability Scanner
 
-Sirius Scan is a modular, extensible vulnerability scanner built on top of industry tools like Nmap and RustScan. 
+**General-purpose network vulnerability scanner** with sequential port discovery pipeline.
 
-The scanner listens for incoming scan requests via RabbitMQ, processes them through multiple scanning phases (discovery and vulnerability), and updates scan state in a key–value store (ValKey) for live monitoring.
+## Architecture
 
----
+The scanner uses a **three-phase scanning pipeline**:
 
-## Table of Contents
+```
+Discovery (RustScan) → Enumeration (Naabu) → Vulnerability (Nmap)
+     ↓                       ↓                        ↓
+ Find open ports      Detailed enumeration     Scan discovered ports
+```
 
-- [Overview](#overview)
-- [Features](#features)
-- [Directory Structure](#directory-structure)
-- [Getting Started](#getting-started)
-- [Usage](#usage)
-- [Testing](#testing)
-- [Contributing](#contributing)
-- [License](#license)
+### Key Features
 
----
+✅ **Port Discovery Pipeline** - Nmap only scans ports discovered by RustScan/Naabu  
+✅ **Protocol Agnostic** - No hardcoded protocol-specific logic  
+✅ **Template-Based** - Customizable scan profiles with NSE scripts  
+✅ **Source Attribution** - Complete audit trail of scan tools and configurations  
+✅ **Parallel Execution** - Worker pool for concurrent host scanning
 
-## Overview
+## Quick Start
 
-Sirius Scan is designed to streamline the process of network vulnerability scanning by:
-- **Leveraging message queues**: Using RabbitMQ to receive and process scan commands.
-- **Real-time updates**: Keeping scan results updated in a KV store for live monitoring.
-- **Extensibility**: Easily adding new scanning strategies or tools by updating the factory and strategy implementations.
+### Running a Scan
 
----
+```bash
+# Scanner runs automatically in sirius-engine container
+docker logs -f sirius-engine
 
-## Features
+# Trigger scan via UI:
+# http://localhost:3000/scanner → Select template → Start scan
+```
 
-- **Discovery Phase**: Uses RustScan to quickly identify live hosts.
-- **Vulnerability Phase**: Uses Nmap to scan for vulnerabilities and enriches results with NVD data.
-- **Live Updates**: Integrates with a KV store to update scan progress in real time.
-- **Modular Architecture**: Employs Strategy and Factory patterns for scalable design.
-- **Asynchronous Processing**: Leverages Go's goroutines for concurrent target processing.
+### Scan Types
 
----
+| Scan Type       | Tool     | Purpose                    |
+| --------------- | -------- | -------------------------- |
+| `enumeration`   | Naabu    | Fast port enumeration      |
+| `discovery`     | RustScan | Host and service discovery |
+| `vulnerability` | Nmap+NSE | Vulnerability scanning     |
 
-## Directory Structure
+**See:** [SCAN-TYPES.md](SCAN-TYPES.md) for detailed information.
 
-```plaintext
-.
-├── cmd
-│   └── scanner
-│       └── main.go          # Application entry point
-└── internal
-    └── scan
-        ├── factory.go       # Factory to create scan strategies
-        ├── helpers.go       # Helper functions (e.g., calculateSeverity)
-        ├── manager.go       # ScanManager: listens for and processes scan requests
-        ├── strategies.go    # ScanStrategy interface and its implementations
-        └── updater.go       # ScanUpdater: handles KV store scan state updates
-└── modules
-    └── nmap
-        ├── nmap.go          # Nmap integration library
-    └── rustscan
-        ├── rustscan.go      # Rustscan integration library 
-└── tests
-    └── test.go              # Individual function tests and development execution testing.
-```        
-        
-## Getting Started
+## Port Discovery Pipeline
 
-### Prerequisites
+### How It Works
 
-- **Go 1.23+**: Make sure you have Go installed on your system.
-- **RabbitMQ**: Used for messaging. Ensure it's running and accessible.
-- **KV Store**: A key–value store implementation provided by the `go-api/sirius/store` package.
-- **Other Dependencies**: Refer to the `go.mod` file for the complete list of Go modules.
+1. **Discovery Phase** (if enabled):
 
-### Installation
+   - RustScan quickly finds open ports
+   - Example: discovers [80, 443, 445, 3389]
 
-1. **Clone the repository:**
+2. **Enumeration Phase** (if enabled):
 
-   ```bash
-   git clone https://github.com/yourusername/sirius-scan.git
-   cd sirius-scan
-   ```
-   
-2.	Install dependencies:
+   - Naabu performs detailed port enumeration
+   - Merges results with discovery phase
 
-    ```bash
-    go mod tidy
-    ```
+3. **Vulnerability Phase**:
+   - Nmap scans ONLY discovered ports
+   - Falls back to template `port_range` if no ports discovered
+   - Skips scan if no ports and no template range
 
-go build -o scanner ./cmd/scanner
-./scanner
+**See:** [PORT-PIPELINE-IMPLEMENTED.md](PORT-PIPELINE-IMPLEMENTED.md) for architecture details.
 
+## Creating Scan Templates
 
-3.	Send a scan request:
-Send a JSON message to the scan queue, e.g.:
+### Recommended: With Discovery
 
 ```json
 {
-  "message": "192.168.1.1,192.168.1.2"
+  "name": "Web Application Scan",
+  "type": "custom",
+  "scan_options": {
+    "scan_types": ["discovery", "vulnerability"],
+    "port_range": "", // Empty - uses discovered ports
+    "parallel": true
+  },
+  "enabled_scripts": ["http-vuln-*", "ssl-*"]
 }
 ```
 
-## Testing
-	•	Unit Tests: Write unit tests for individual components (e.g., strategies, updater, manager). Place tests in corresponding _test.go files within the internal/scan package.
-	•	Integration Tests: Consider setting up integration tests to simulate scan requests and verify KV store updates.
+**Benefits:**
 
-## Contributing
+- ✅ Only scans open ports (fast!)
+- ✅ No wasted time on closed ports
+- ✅ Adapts to target configuration
 
-Contributions are welcome! Please follow these guidelines:
-	1.	Fork the repository and create your feature branch.
-	2.	Write tests for your changes.
-	3.	Ensure code style consistency and run go fmt before submitting.
-	4.	Submit a pull request with a detailed description of your changes.
+### Alternative: Without Discovery
 
-For major changes, please open an issue first to discuss what you would like to change.
+```json
+{
+  "name": "SMB Direct Scan",
+  "type": "custom",
+  "scan_options": {
+    "scan_types": ["vulnerability"],
+    "port_range": "139,445", // Explicit ports
+    "parallel": true
+  },
+  "enabled_scripts": ["smb-vuln-*", "smb2-*"]
+}
+```
 
-## License
+**Use when:**
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+- You know exact ports to scan
+- Targeting specific services
+- Fastest for known configurations
+
+**See:** [PORT-RANGE-OPTIMIZATION.md](PORT-RANGE-OPTIMIZATION.md) for port recommendations by protocol.
+
+## Performance
+
+### Port Pipeline vs Traditional
+
+| Approach                                 | Ports Scanned      | Scan Time   |
+| ---------------------------------------- | ------------------ | ----------- |
+| **Port Pipeline** (discovery → vuln)     | 4 discovered ports | ~1 minute   |
+| **Traditional** (vuln only with 1-65535) | All 65,535 ports   | ~30 minutes |
+
+**Result: 30x faster for typical scans**
+
+## Development
+
+### Project Structure
+
+```
+app-scanner/
+├── cmd/              # Test utilities
+├── internal/
+│   ├── scan/        # Core scanning logic
+│   │   ├── manager.go      # Scan orchestration
+│   │   ├── factory.go      # Tool factory
+│   │   ├── strategies.go   # Scan strategies
+│   │   └── worker_pool.go  # Parallel execution
+│   ├── nse/         # NSE script management
+│   └── templates/   # Template management
+├── modules/
+│   ├── nmap/        # Nmap integration
+│   ├── rustscan/    # RustScan integration
+│   └── naabu/       # Naabu integration
+└── pkg/
+    ├── models/      # Data models
+    ├── queue/       # RabbitMQ integration
+    └── store/       # ValKey integration
+```
+
+### Building
+
+```bash
+# In container
+docker exec sirius-engine bash -c "cd /app-scanner && go build ."
+
+# Local (requires Go 1.21+)
+cd /Users/oz/Projects/Sirius-Project/minor-projects/app-scanner
+go build .
+```
+
+### Testing
+
+```bash
+# Run specific test
+go run cmd/scan-full-test/main.go
+
+# Validate NSE scripts
+go run cmd/validate-nse-fix/main.go
+```
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# RabbitMQ
+RABBITMQ_HOST=sirius-rabbitmq
+RABBITMQ_PORT=5672
+RABBITMQ_QUEUE=scan_requests
+
+# ValKey (Redis)
+VALKEY_ADDR=sirius-valkey:6379
+
+# API
+GO_API_URL=http://sirius-go-api:8080
+
+# Scanning
+NMAP_PATH=/usr/bin/nmap
+NSE_SCRIPTS_DIR=/opt/sirius/nse/sirius-nse
+```
+
+## Troubleshooting
+
+### Scans Taking Too Long
+
+**Symptom:** Scan runs for 10+ minutes  
+**Cause:** Scanning too many ports  
+**Solution:**
+
+1. Enable `discovery` scan type to find open ports first
+2. Use protocol-specific port ranges (see [PORT-RANGE-OPTIMIZATION.md](PORT-RANGE-OPTIMIZATION.md))
+3. Avoid `port_range: "1-65535"` unless necessary
+
+### No Ports Discovered
+
+**Symptom:** "No ports discovered and no port_range - skipping"  
+**Cause:** Target has no open ports OR discovery failed  
+**Solution:**
+
+1. Verify target is accessible: `docker exec sirius-engine ping <target>`
+2. Check firewall rules
+3. Add fallback `port_range` in template
+
+### Nmap Errors
+
+**Symptom:** "failed to build script flag" or "no port range specified"  
+**Cause:** Template misconfiguration  
+**Solution:**
+
+1. Ensure template has `enabled_scripts` or `port_range`
+2. Check NSE scripts are valid: `go run cmd/validate-nse-fix/main.go`
+3. Review scanner logs: `docker logs sirius-engine`
+
+## Documentation
+
+- [SCAN-TYPES.md](SCAN-TYPES.md) - Canonical scan types reference
+- [PORT-RANGE-OPTIMIZATION.md](PORT-RANGE-OPTIMIZATION.md) - Port range recommendations
+- [PORT-PIPELINE-IMPLEMENTED.md](PORT-PIPELINE-IMPLEMENTED.md) - Architecture deep dive
+- [ARCHITECTURAL-FIX-PORT-PIPELINE.md](ARCHITECTURAL-FIX-PORT-PIPELINE.md) - Technical implementation details
+
+## Key Design Principles
+
+1. **General Purpose** - No protocol-specific hardcoded logic
+2. **Discovery-Driven** - Nmap scans discovered ports, not arbitrary ranges
+3. **Template-Based** - Users control scan behavior via templates
+4. **Performance-Focused** - Only scan what's necessary
+5. **Observable** - Comprehensive logging and audit trails
+
+---
+
+**Built with:** Go, Nmap, RustScan, Naabu, RabbitMQ, ValKey

@@ -56,9 +56,9 @@ func parseHostInfo(line string) sirius.Host {
 		port, err := strconv.Atoi(p)
 		if err == nil {
 			siriusPort := sirius.Port{
-				ID:       port,
-				Protocol: "",
-				State:    "",
+				Number:   port,
+				Protocol: "tcp",
+				State:    "open",
 			}
 			siriusPorts = append(siriusPorts, siriusPort)
 		}
