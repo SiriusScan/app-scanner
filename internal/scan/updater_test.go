@@ -32,6 +32,45 @@ func (f *fakeKVStore) SetValue(ctx context.Context, key string, value string) er
 	return nil
 }
 
+// DeleteValue removes the key from the store.
+func (f *fakeKVStore) DeleteValue(ctx context.Context, key string) error {
+	delete(f.data, key)
+	return nil
+}
+
+// GetTTL returns the TTL for a key (stub implementation).
+func (f *fakeKVStore) GetTTL(ctx context.Context, key string) (int, error) {
+	if _, ok := f.data[key]; ok {
+		return -1, nil // -1 means no expiration
+	}
+	return -2, errors.New("key not found") // -2 means key doesn't exist
+}
+
+// ListKeys returns all keys matching the pattern (stub implementation).
+func (f *fakeKVStore) ListKeys(ctx context.Context, pattern string) ([]string, error) {
+	keys := make([]string, 0, len(f.data))
+	for k := range f.data {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+// SetExpire sets an expiration time on a key (stub implementation).
+func (f *fakeKVStore) SetExpire(ctx context.Context, key string, ttl int) error {
+	// In a real implementation, this would set TTL. For testing, we just verify the key exists.
+	if _, ok := f.data[key]; !ok {
+		return errors.New("key not found")
+	}
+	return nil
+}
+
+// SetValueWithTTL sets a key with an expiration time (stub implementation).
+func (f *fakeKVStore) SetValueWithTTL(ctx context.Context, key string, value string, ttl int) error {
+	f.data[key] = value
+	// In a real implementation, this would also set TTL. For testing, we just store the value.
+	return nil
+}
+
 // Close is a stub for the Close method.
 func (f *fakeKVStore) Close() error {
 	return nil

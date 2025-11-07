@@ -385,7 +385,7 @@ func (sm *ScanManager) validateScanMessage(msg *ScanMessage) error {
 
 // processTarget runs the discovery scan followed by a vulnerability scan
 func (sm *ScanManager) processTarget(target Target) {
-	log.Printf("Processing target: %+v", target)
+	log.Printf("Processing target: Type=%s, Value=%s, Timeout=%d", target.Type, target.Value, target.Timeout)
 
 	// Log target processing start
 	sm.logger.LogScanEvent(sm.currentScanID, "target_processing", "Target processing started", map[string]interface{}{
@@ -412,6 +412,15 @@ func (sm *ScanManager) processTarget(target Target) {
 
 	// Add each IP as a task to the worker pool
 	log.Printf("Adding %d IPs to worker pool (scan types: %v, port range: %s)", len(targetIPs), sm.currentScanOptions.ScanTypes, sm.currentScanOptions.PortRange)
+
+	// Log scan started event (new event system)
+	sm.logger.LogScanStarted(sm.currentScanID, targetIPs, map[string]interface{}{
+		"scan_types":   sm.currentScanOptions.ScanTypes,
+		"port_range":   sm.currentScanOptions.PortRange,
+		"target_value": target.Value,
+		"target_type":  target.Type,
+	})
+
 	for _, ip := range targetIPs {
 		task := ScanTask{
 			IP:      ip,
@@ -517,12 +526,12 @@ func (sm *ScanManager) markHostComplete(ip string) error {
 			scan.Status = "completed"
 			scan.EndTime = time.Now().Format(time.RFC3339)
 
-			// Log scan completion
-			sm.logger.LogScanCompletion(sm.currentScanID, "all_targets", map[string]interface{}{
-				"total_hosts":           len(scan.Hosts),
+			// Log scan completion (new event system)
+			sm.logger.LogScanCompleted(sm.currentScanID, map[string]interface{}{
+				"hosts_discovered":      len(scan.Hosts),
 				"hosts_completed":       scan.HostsCompleted,
 				"vulnerabilities_found": len(scan.Vulnerabilities),
-				"scan_duration":         time.Since(time.Now()).String(), // This will be calculated properly in real implementation
+				"total_hosts":           len(scan.Hosts),
 			})
 		}
 		return nil
@@ -572,9 +581,11 @@ func (sm *ScanManager) runEnumeration(ip string) ([]int, error) {
 	}
 
 	// Update KV store with enumeration details but preserve existing data
+	hostWasNew := false
 	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
 		if !contains(scan.Hosts, enumResults.IP) {
 			scan.Hosts = append(scan.Hosts, enumResults.IP)
+			hostWasNew = true
 		}
 		if scan.StartTime == "" {
 			scan.StartTime = time.Now().Format(time.RFC3339)
@@ -584,7 +595,16 @@ func (sm *ScanManager) runEnumeration(ip string) ([]int, error) {
 		return nil, fmt.Errorf("failed to update scan with enumeration results for host %s: %v", ip, err)
 	}
 
-	log.Printf("Enumeration results: %+v", enumResults)
+	// Log host discovered event (new event system)
+	if hostWasNew {
+		sm.logger.LogHostDiscovered(enumResults.IP, sm.currentScanID, map[string]interface{}{
+			"ports_found": len(enumeratedPorts),
+			"os":          enumResults.OS,
+		})
+	}
+
+	log.Printf("Enumeration results: IP=%s, Hostname=%s, Ports=%d, Services=%d, OS=%s",
+		enumResults.IP, enumResults.Hostname, len(enumResults.Ports), len(enumResults.Services), enumResults.OS)
 	return enumeratedPorts, nil // Return enumerated ports for pipeline
 }
 
@@ -662,14 +682,24 @@ func (sm *ScanManager) runDiscovery(ip string) ([]int, error) {
 	}
 
 	// Update KV store with the discovered host.
+	hostWasNew := false
 	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
 		if !contains(scan.Hosts, discoveryResults.IP) {
 			scan.Hosts = append(scan.Hosts, discoveryResults.IP)
+			hostWasNew = true
 		}
 		return nil
 	}); err != nil {
 		log.Printf("Warning: Failed to update scan results store for %s: %v", discoveryResults.IP, err)
 		// Still continue with the scan
+	}
+
+	// Log host discovered event (new event system)
+	if hostWasNew {
+		sm.logger.LogHostDiscovered(discoveryResults.IP, sm.currentScanID, map[string]interface{}{
+			"ports_found":    len(discoveredPorts),
+			"discovery_tool": "rustscan",
+		})
 	}
 
 	return discoveredPorts, nil // Return discovered ports for pipeline

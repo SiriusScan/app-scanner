@@ -1,0 +1,22 @@
+# Binaries
+scanner-fixed
+app-scanner
+*.exe
+*.bin
+
+# Build artifacts
+*.o
+*.a
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+

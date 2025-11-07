@@ -52,3 +52,28 @@ func (lc *LoggingClient) LogScanCompletion(scanID, target string, metadata map[s
 func (lc *LoggingClient) Close() error {
 	return lc.client.Close()
 }
+
+// LogScanStarted logs when a scan starts (new convenience method)
+func (lc *LoggingClient) LogScanStarted(scanID string, targets []string, options map[string]interface{}) {
+	lc.client.LogScanStarted(scanID, targets, options)
+}
+
+// LogScanCompleted logs when a scan completes successfully (new convenience method)
+func (lc *LoggingClient) LogScanCompleted(scanID string, stats map[string]interface{}) {
+	lc.client.LogScanCompleted(scanID, stats)
+}
+
+// LogHostDiscovered logs when a new host is discovered (new convenience method)
+func (lc *LoggingClient) LogHostDiscovered(hostIP, scanID string, metadata map[string]interface{}) {
+	lc.client.LogHostDiscovered(hostIP, scanID, metadata)
+}
+
+// LogVulnerabilityFound logs when vulnerabilities are found (new convenience method)
+func (lc *LoggingClient) LogVulnerabilityFound(vulnID, hostIP, severity string, metadata map[string]interface{}) {
+	lc.client.LogVulnerabilityFound(vulnID, hostIP, severity, metadata)
+}
+
+// LogEvent logs a structured event with all event fields (new convenience method)
+func (lc *LoggingClient) LogEvent(service, subcomponent, eventType, severity, title, description string, entityType, entityID string, metadata map[string]interface{}) {
+	lc.client.LogEvent(service, subcomponent, eventType, severity, title, description, entityType, entityID, metadata)
+}
