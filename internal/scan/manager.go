@@ -105,6 +105,9 @@ func NewScanManager(kvStore store.KVStore, toolFactory *ScanToolFactory, updater
 	apiBaseURL := os.Getenv("SIRIUS_API_URL")
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:9001" // Default for development
+		log.Printf("⚠️  SIRIUS_API_URL not set, using default: %s", apiBaseURL)
+	} else {
+		log.Printf("✅ Using SIRIUS_API_URL from environment: %s", apiBaseURL)
 	}
 
 	sm := &ScanManager{
