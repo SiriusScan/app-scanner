@@ -63,8 +63,21 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 				return
 			}
 
-			// Process the task
-			wp.manager.scanIP(task.IP)
+			// Check if context is cancelled before processing
+			if ctx.Err() != nil {
+				log.Printf("Worker %d skipping task for %s - context cancelled", id, task.IP)
+				continue
+			}
+
+			// Get the active scan context from the manager
+			// This allows individual scans to be cancelled
+			scanCtx := wp.manager.GetActiveScanContext()
+			if scanCtx == nil {
+				scanCtx = ctx // Fallback to worker context
+			}
+
+			// Process the task with scan context
+			wp.manager.scanIP(scanCtx, task.IP)
 
 		case <-ctx.Done():
 			log.Printf("Worker %d context cancelled", id)

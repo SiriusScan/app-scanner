@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -8,23 +9,16 @@ import (
 
 	"github.com/SiriusScan/app-scanner/modules/naabu"
 	"github.com/SiriusScan/app-scanner/modules/nmap"
-	"github.com/SiriusScan/app-scanner/modules/rustscan"
 	"github.com/SiriusScan/go-api/nvd"
 	"github.com/SiriusScan/go-api/sirius"
 )
 
 // ScanStrategy defines an interface for executing a scan on a target.
+// The Execute method accepts a context for cancellation support.
 type ScanStrategy interface {
 	Execute(target string) (sirius.Host, error)
-}
-
-// RustScanStrategy implements discovery scanning using RustScan.
-type RustScanStrategy struct{}
-
-// Execute performs the discovery scan using RustScan.
-func (r *RustScanStrategy) Execute(target string) (sirius.Host, error) {
-	log.Printf("Executing discovery scan on target: %s", target)
-	return rustscan.Scan(target)
+	// ExecuteWithContext performs the scan with cancellation support
+	ExecuteWithContext(ctx context.Context, target string) (sirius.Host, error)
 }
 
 // NmapStrategy implements vulnerability scanning using Nmap.
@@ -35,13 +29,25 @@ type NmapStrategy struct {
 }
 
 // Execute performs the vulnerability scan using Nmap and expands vulnerability details.
+// This is a convenience method that uses context.Background().
 func (n *NmapStrategy) Execute(target string) (sirius.Host, error) {
+	return n.ExecuteWithContext(context.Background(), target)
+}
+
+// ExecuteWithContext performs the vulnerability scan with cancellation support.
+func (n *NmapStrategy) ExecuteWithContext(ctx context.Context, target string) (sirius.Host, error) {
 	log.Printf("Starting vulnerability scan on target: %s", target)
 
-	// Create a scan config
+	// Check for cancellation before starting
+	if ctx.Err() != nil {
+		return sirius.Host{}, fmt.Errorf("scan cancelled before starting")
+	}
+
+	// Create a scan config with context
 	config := nmap.ScanConfig{
 		Target:    target,
 		PortRange: n.PortRange, // Pass port range from template
+		Ctx:       ctx,         // Pass context for cancellation
 	}
 
 	// Use explicit script list if provided, otherwise fall back to protocols
@@ -65,6 +71,11 @@ func (n *NmapStrategy) Execute(target string) (sirius.Host, error) {
 	results, err := nmap.ScanWithConfig(config)
 	if err != nil {
 		return sirius.Host{}, err
+	}
+
+	// Check for cancellation after scan
+	if ctx.Err() != nil {
+		return sirius.Host{}, fmt.Errorf("scan cancelled")
 	}
 
 	// Expand vulnerability details using NVD.
@@ -148,16 +159,29 @@ func expandVulnerability(vuln sirius.Vulnerability) sirius.Vulnerability {
 	return vuln
 }
 
-// Update NaabuStrategy to use the new module
+// NaabuStrategy implements port enumeration using Naabu
 type NaabuStrategy struct {
 	Ports   string
 	Retries int
 }
 
+// Execute performs port enumeration using Naabu.
+// This is a convenience method that uses context.Background().
 func (n *NaabuStrategy) Execute(target string) (sirius.Host, error) {
+	return n.ExecuteWithContext(context.Background(), target)
+}
+
+// ExecuteWithContext performs port enumeration with cancellation support.
+func (n *NaabuStrategy) ExecuteWithContext(ctx context.Context, target string) (sirius.Host, error) {
+	// Check for cancellation before starting
+	if ctx.Err() != nil {
+		return sirius.Host{}, fmt.Errorf("scan cancelled before starting")
+	}
+
 	host, err := naabu.Scan(target, naabu.ScanConfig{
 		PortRange: n.Ports,
 		Retries:   n.Retries,
+		Ctx:       ctx, // Pass context for cancellation
 	})
 	if errors.Is(err, naabu.ErrHostDown) {
 		log.Printf("Host %s appears down (no open ports found by NAABU), skipping further scans.", target)
@@ -167,4 +191,29 @@ func (n *NaabuStrategy) Execute(target string) (sirius.Host, error) {
 		return sirius.Host{}, err
 	}
 	return host, nil
+}
+
+// FingerprintResult contains the results of a fingerprint scan.
+// This struct is used by both the FingerprintStrategy interface and the ping++ adapter.
+type FingerprintResult struct {
+	IsAlive  bool              // Whether the host is alive/reachable
+	OSFamily string            // Detected OS family (e.g., "windows", "linux", "unknown")
+	TTL      int               // TTL value from ICMP response
+	Details  map[string]string // Additional fingerprint details (confidence, hops, etc.)
+}
+
+// FingerprintStrategy defines an interface for host fingerprinting operations.
+// The default implementation uses ping++ for ICMP/TCP probing and TTL-based OS detection.
+//
+// Implementations:
+//   - PingPlusPlusAdapter: Real fingerprinting using ping++ (see pingpp_adapter.go)
+//
+// Configuration options are available via ScanOptions:
+//   - FingerprintProbes: probe types (icmp, tcp, arp, smb)
+//   - FingerprintTimeout: per-probe timeout
+//   - DisableICMP: for unprivileged execution
+type FingerprintStrategy interface {
+	Fingerprint(target string) (FingerprintResult, error)
+	// FingerprintWithContext performs fingerprinting with cancellation support
+	FingerprintWithContext(ctx context.Context, target string) (FingerprintResult, error)
 }

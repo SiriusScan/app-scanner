@@ -104,7 +104,7 @@ func printScanResults(results sirius.Host) {
 	if len(results.Ports) > 0 {
 		fmt.Printf("\nPorts (%d):\n", len(results.Ports))
 		for _, port := range results.Ports {
-			fmt.Printf("- %d/%s: %s\n", port.ID, port.Protocol, port.State)
+			fmt.Printf("- %d/%s: %s\n", port.Number, port.Protocol, port.State)
 		}
 	}
 

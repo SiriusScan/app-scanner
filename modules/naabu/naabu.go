@@ -21,6 +21,7 @@ var Scan = scanImpl
 type ScanConfig struct {
 	PortRange string
 	Retries   int
+	Ctx       context.Context // Context for cancellation support
 }
 
 // scanImpl is the default implementation of the Naabu scan
@@ -28,6 +29,17 @@ func scanImpl(target string, config ScanConfig) (sirius.Host, error) {
 	// Validate if target is a single IP
 	if ip := net.ParseIP(target); ip == nil {
 		return sirius.Host{}, fmt.Errorf("naabu scan requires a single IP address, got: %s", target)
+	}
+
+	// Ensure context is set (use background if not provided for backward compatibility)
+	ctx := config.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Check for cancellation before starting
+	if ctx.Err() != nil {
+		return sirius.Host{}, fmt.Errorf("scan cancelled before starting: %w", ctx.Err())
 	}
 
 	var results []sirius.Port
@@ -62,7 +74,12 @@ func scanImpl(target string, config ScanConfig) (sirius.Host, error) {
 	}
 	defer naabuRunner.Close()
 
-	if err := naabuRunner.RunEnumeration(context.Background()); err != nil {
+	// Use the provided context for cancellation support
+	if err := naabuRunner.RunEnumeration(ctx); err != nil {
+		// Check if it was a cancellation
+		if ctx.Err() != nil {
+			return sirius.Host{}, fmt.Errorf("naabu scan cancelled: %w", ctx.Err())
+		}
 		return sirius.Host{}, fmt.Errorf("naabu enumeration failed: %v", err)
 	}
 

@@ -7,18 +7,20 @@
 The scanner uses a **three-phase scanning pipeline**:
 
 ```
-Discovery (RustScan) → Enumeration (Naabu) → Vulnerability (Nmap)
+Fingerprint (ping++) → Enumeration (Naabu) → Vulnerability (Nmap)
      ↓                       ↓                        ↓
- Find open ports      Detailed enumeration     Scan discovered ports
+ Host liveness         Find open ports          Scan discovered ports
+ + OS detection
 ```
 
 ### Key Features
 
-✅ **Port Discovery Pipeline** - Nmap only scans ports discovered by RustScan/Naabu  
-✅ **Protocol Agnostic** - No hardcoded protocol-specific logic  
-✅ **Template-Based** - Customizable scan profiles with NSE scripts  
-✅ **Source Attribution** - Complete audit trail of scan tools and configurations  
-✅ **Parallel Execution** - Worker pool for concurrent host scanning
+- **Port Discovery Pipeline** - Nmap only scans ports discovered by Naabu
+- **Protocol Agnostic** - No hardcoded protocol-specific logic
+- **Template-Based** - Customizable scan profiles with NSE scripts
+- **Source Attribution** - Complete audit trail of scan tools and configurations
+- **Parallel Execution** - Worker pool for concurrent host scanning
+- **Fingerprint Ready** - Placeholder for ping++ integration (coming soon)
 
 ## Quick Start
 
@@ -34,11 +36,14 @@ docker logs -f sirius-engine
 
 ### Scan Types
 
-| Scan Type       | Tool     | Purpose                    |
-| --------------- | -------- | -------------------------- |
-| `enumeration`   | Naabu    | Fast port enumeration      |
-| `discovery`     | RustScan | Host and service discovery |
-| `vulnerability` | Nmap+NSE | Vulnerability scanning     |
+| Scan Type       | Tool     | Purpose                      |
+| --------------- | -------- | ---------------------------- |
+| `fingerprint`   | ping++\* | Host liveness + OS detection |
+| `enumeration`   | Naabu    | Fast port enumeration        |
+| `port_scan`     | Naabu    | Alias for enumeration        |
+| `vulnerability` | Nmap+NSE | Vulnerability scanning       |
+
+\*ping++ is currently a placeholder - full implementation coming soon.
 
 **See:** [SCAN-TYPES.md](SCAN-TYPES.md) for detailed information.
 
@@ -46,34 +51,31 @@ docker logs -f sirius-engine
 
 ### How It Works
 
-1. **Discovery Phase** (if enabled):
-
-   - RustScan quickly finds open ports
-   - Example: discovers [80, 443, 445, 3389]
+1. **Fingerprint Phase** (if enabled, placeholder):
+   - ping++ performs host liveness detection
+   - Determines OS family via TTL analysis
+   - Skips dead hosts early
 
 2. **Enumeration Phase** (if enabled):
-
-   - Naabu performs detailed port enumeration
-   - Merges results with discovery phase
+   - Naabu performs fast port discovery
+   - Example: discovers [80, 443, 445, 3389]
 
 3. **Vulnerability Phase**:
    - Nmap scans ONLY discovered ports
    - Falls back to template `port_range` if no ports discovered
    - Skips scan if no ports and no template range
 
-**See:** [PORT-PIPELINE-IMPLEMENTED.md](PORT-PIPELINE-IMPLEMENTED.md) for architecture details.
-
 ## Creating Scan Templates
 
-### Recommended: With Discovery
+### Recommended: With Enumeration
 
 ```json
 {
   "name": "Web Application Scan",
   "type": "custom",
   "scan_options": {
-    "scan_types": ["discovery", "vulnerability"],
-    "port_range": "", // Empty - uses discovered ports
+    "scan_types": ["enumeration", "vulnerability"],
+    "port_range": "",
     "parallel": true
   },
   "enabled_scripts": ["http-vuln-*", "ssl-*"]
@@ -82,11 +84,11 @@ docker logs -f sirius-engine
 
 **Benefits:**
 
-- ✅ Only scans open ports (fast!)
-- ✅ No wasted time on closed ports
-- ✅ Adapts to target configuration
+- Only scans open ports (fast!)
+- No wasted time on closed ports
+- Adapts to target configuration
 
-### Alternative: Without Discovery
+### Alternative: Without Enumeration
 
 ```json
 {
@@ -94,7 +96,7 @@ docker logs -f sirius-engine
   "type": "custom",
   "scan_options": {
     "scan_types": ["vulnerability"],
-    "port_range": "139,445", // Explicit ports
+    "port_range": "139,445",
     "parallel": true
   },
   "enabled_scripts": ["smb-vuln-*", "smb2-*"]
@@ -115,7 +117,7 @@ docker logs -f sirius-engine
 
 | Approach                                 | Ports Scanned      | Scan Time   |
 | ---------------------------------------- | ------------------ | ----------- |
-| **Port Pipeline** (discovery → vuln)     | 4 discovered ports | ~1 minute   |
+| **Port Pipeline** (enumeration → vuln)   | 4 discovered ports | ~1 minute   |
 | **Traditional** (vuln only with 1-65535) | All 65,535 ports   | ~30 minutes |
 
 **Result: 30x faster for typical scans**
@@ -126,23 +128,26 @@ docker logs -f sirius-engine
 
 ```
 app-scanner/
-├── cmd/              # Test utilities
+├── cmd/                    # Test utilities
 ├── internal/
-│   ├── scan/        # Core scanning logic
-│   │   ├── manager.go      # Scan orchestration
-│   │   ├── factory.go      # Tool factory
-│   │   ├── strategies.go   # Scan strategies
-│   │   └── worker_pool.go  # Parallel execution
-│   ├── nse/         # NSE script management
-│   └── templates/   # Template management
+│   ├── scan/              # Core scanning logic
+│   │   ├── manager.go     # Scan orchestration
+│   │   ├── factory.go     # Tool factory
+│   │   ├── strategies.go  # Scan strategies
+│   │   ├── utils.go       # Helper functions
+│   │   └── worker_pool.go # Parallel execution
+│   ├── nse/               # NSE script management
+│   └── templates/         # Template management
 ├── modules/
-│   ├── nmap/        # Nmap integration
-│   ├── rustscan/    # RustScan integration
-│   └── naabu/       # Naabu integration
+│   ├── nmap/              # Nmap integration
+│   │   └── args/          # Script arguments
+│   └── naabu/             # Naabu integration
+├── documentation/
+│   └── archive/           # Historical documentation
 └── pkg/
-    ├── models/      # Data models
-    ├── queue/       # RabbitMQ integration
-    └── store/       # ValKey integration
+    ├── models/            # Data models
+    ├── queue/             # RabbitMQ integration
+    └── store/             # ValKey integration
 ```
 
 ### Building
@@ -195,14 +200,14 @@ NSE_SCRIPTS_DIR=/opt/sirius/nse/sirius-nse
 **Cause:** Scanning too many ports  
 **Solution:**
 
-1. Enable `discovery` scan type to find open ports first
+1. Enable `enumeration` scan type to find open ports first
 2. Use protocol-specific port ranges (see [PORT-RANGE-OPTIMIZATION.md](PORT-RANGE-OPTIMIZATION.md))
 3. Avoid `port_range: "1-65535"` unless necessary
 
 ### No Ports Discovered
 
 **Symptom:** "No ports discovered and no port_range - skipping"  
-**Cause:** Target has no open ports OR discovery failed  
+**Cause:** Target has no open ports OR enumeration failed  
 **Solution:**
 
 1. Verify target is accessible: `docker exec sirius-engine ping <target>`
@@ -223,8 +228,11 @@ NSE_SCRIPTS_DIR=/opt/sirius/nse/sirius-nse
 
 - [SCAN-TYPES.md](SCAN-TYPES.md) - Canonical scan types reference
 - [PORT-RANGE-OPTIMIZATION.md](PORT-RANGE-OPTIMIZATION.md) - Port range recommendations
-- [PORT-PIPELINE-IMPLEMENTED.md](PORT-PIPELINE-IMPLEMENTED.md) - Architecture deep dive
-- [ARCHITECTURAL-FIX-PORT-PIPELINE.md](ARCHITECTURAL-FIX-PORT-PIPELINE.md) - Technical implementation details
+
+### Archived (Historical)
+
+- [documentation/archive/ARCHITECTURAL-FIX-PORT-PIPELINE.md](documentation/archive/ARCHITECTURAL-FIX-PORT-PIPELINE.md) - Historical implementation details
+- [documentation/archive/PORT-PIPELINE-IMPLEMENTED.md](documentation/archive/PORT-PIPELINE-IMPLEMENTED.md) - Original pipeline implementation
 
 ## Key Design Principles
 
@@ -233,7 +241,8 @@ NSE_SCRIPTS_DIR=/opt/sirius/nse/sirius-nse
 3. **Template-Based** - Users control scan behavior via templates
 4. **Performance-Focused** - Only scan what's necessary
 5. **Observable** - Comprehensive logging and audit trails
+6. **Modular** - Fingerprint phase ready for ping++ integration
 
 ---
 
-**Built with:** Go, Nmap, RustScan, Naabu, RabbitMQ, ValKey
+**Built with:** Go, Nmap, Naabu, RabbitMQ, ValKey

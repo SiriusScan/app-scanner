@@ -106,10 +106,13 @@ func main() {
 	fmt.Println("\n✨ Full scan pipeline test completed")
 }
 
-// runDiscovery performs port discovery directly
+// runDiscovery performs port discovery directly using Naabu
 func runDiscovery(target string) (sirius.Host, error) {
-	// Create and use the RustScanStrategy directly
-	strategy := &scan.RustScanStrategy{}
+	// Create and use the NaabuStrategy directly for port discovery
+	strategy := &scan.NaabuStrategy{
+		Ports:   "", // Use default port range
+		Retries: 3,
+	}
 	return strategy.Execute(target)
 }
 
@@ -145,7 +148,7 @@ func printScanResults(results sirius.Host) {
 	if len(results.Ports) > 0 {
 		fmt.Printf("\nPorts (%d):\n", len(results.Ports))
 		for _, port := range results.Ports {
-			fmt.Printf("- %d/%s: %s\n", port.ID, port.Protocol, port.State)
+			fmt.Printf("- %d/%s: %s\n", port.Number, port.Protocol, port.State)
 		}
 	}
 

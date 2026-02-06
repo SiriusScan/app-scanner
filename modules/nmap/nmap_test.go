@@ -273,7 +273,7 @@ func TestNmapNSEIntegration(t *testing.T) {
 	t.Logf("Created test repo at: %s", repoPath)
 
 	// Set up the repo manager with the test manifest
-	repoManager := nse.NewRepoManager(repoPath)
+	repoManager := nse.NewRepoManager(repoPath, "")
 	_, err := repoManager.GetManifest()
 	require.NoError(t, err, "Failed to get manifest")
 
@@ -308,7 +308,7 @@ func TestNmapNSEIntegration(t *testing.T) {
 			// Check that we found the expected port
 			foundPort := false
 			for _, port := range host.Ports {
-				if port.ID == tt.wantPort && port.Protocol == tt.wantProto {
+				if port.Number == tt.wantPort && port.Protocol == tt.wantProto {
 					foundPort = true
 					break
 				}

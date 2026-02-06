@@ -3,6 +3,7 @@ package scan
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SiriusScan/app-scanner/internal/nse"
@@ -52,6 +54,11 @@ type ScanOptions struct {
 	ScanTypes    []string `json:"scan_types"`    // Types of scans to perform
 	MaxRetries   int      `json:"max_retries"`   // Maximum number of retries
 	Parallel     bool     `json:"parallel"`      // Whether to scan targets in parallel
+
+	// Fingerprint options (ping++ integration)
+	FingerprintProbes  []string `json:"fingerprint_probes,omitempty"`  // Probe types: icmp, tcp, arp, smb
+	FingerprintTimeout string   `json:"fingerprint_timeout,omitempty"` // Per-probe timeout (e.g., "3s")
+	DisableICMP        bool     `json:"disable_icmp,omitempty"`        // Disable ICMP for unprivileged mode
 }
 
 // ScanMessage represents the incoming scan request message
@@ -79,6 +86,12 @@ type ScanManager struct {
 	kvStore            store.KVStore
 	apiBaseURL         string         // API base URL for source-aware submissions
 	logger             *LoggingClient // Centralized logging client
+
+	// Cancellation support
+	activeScanCtx    context.Context    // Context for the currently running scan
+	activeScanCancel context.CancelFunc // Cancel function for the current scan
+	scanMutex        sync.Mutex         // Protects scan state during cancellation
+	isCancelling     bool               // Flag to indicate cancellation in progress
 }
 
 // SourcedHostRequest represents the request structure for source-aware API submissions
@@ -121,8 +134,7 @@ func NewScanManager(kvStore store.KVStore, toolFactory *ScanToolFactory, updater
 		apiBaseURL:      apiBaseURL,
 		logger:          NewLoggingClient(),
 		scanStrategies: map[string]ScanStrategy{
-			"discovery": &RustScanStrategy{},
-			"nmap":      &NmapStrategy{},
+			"nmap": &NmapStrategy{},
 		},
 	}
 
@@ -150,21 +162,6 @@ func (sm *ScanManager) detectScannerVersion(toolName string) string {
 			}
 		} else {
 			log.Printf("Warning: Failed to detect nmap version: %v", err)
-		}
-		return "unknown"
-	case "rustscan":
-		if output, err := exec.Command("rustscan", "--version").Output(); err == nil {
-			version := strings.TrimSpace(string(output))
-			if strings.Contains(version, "rustscan") {
-				parts := strings.Fields(version)
-				if len(parts) >= 2 {
-					detectedVersion := parts[1]
-					log.Printf("Detected rustscan version: %s", detectedVersion)
-					return detectedVersion
-				}
-			}
-		} else {
-			log.Printf("Warning: Failed to detect rustscan version: %v", err)
 		}
 		return "unknown"
 	case "naabu":
@@ -292,6 +289,27 @@ func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) e
 	return nil
 }
 
+// submitFingerprintResult creates a minimal host record from fingerprint results and submits it to the API.
+// This enables real-time host discovery visibility - operators see hosts as soon as they're detected alive.
+func (sm *ScanManager) submitFingerprintResult(ip string, result FingerprintResult) error {
+	// Create a minimal host with fingerprint data
+	host := sirius.Host{
+		IP: ip,
+		OS: result.OSFamily,
+	}
+
+	// Add TTL info to OSVersion if available (provides useful context)
+	if result.TTL > 0 {
+		if confidence, ok := result.Details["confidence"]; ok {
+			host.OSVersion = fmt.Sprintf("TTL:%d (%s confidence)", result.TTL, confidence)
+		} else {
+			host.OSVersion = fmt.Sprintf("TTL:%d", result.TTL)
+		}
+	}
+
+	return sm.submitHostWithSource(host, "ping++")
+}
+
 // ListenForScans attaches the ScanManager to the "scan" queue.
 func (sm *ScanManager) ListenForScans() {
 	// Sync NSE scripts before starting to listen for scans
@@ -315,6 +333,12 @@ func (sm *ScanManager) handleMessage(msg string) {
 		sm.logger.LogScanError("unknown", "unknown", "message_parse_error", "Failed to parse scan message", err)
 		return
 	}
+
+	// Create a scan-specific context for cancellation support
+	sm.scanMutex.Lock()
+	sm.isCancelling = false
+	sm.activeScanCtx, sm.activeScanCancel = context.WithCancel(sm.ctx)
+	sm.scanMutex.Unlock()
 
 	// Log scan initiation
 	sm.currentScanID = scanMsg.ID
@@ -434,7 +458,13 @@ func (sm *ScanManager) processTarget(target Target) {
 }
 
 // scanIP performs the actual scanning of a single IP using a sequential pipeline
-func (sm *ScanManager) scanIP(ip string) {
+func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
+	// Check for cancellation before starting
+	if ctx.Err() != nil {
+		log.Printf("[SCAN] Cancelled before scanning %s", ip)
+		return
+	}
+
 	// Validate if this is a single IP before proceeding
 	if net.ParseIP(ip) == nil {
 		log.Printf("Warning: Expected single IP, got: %s", ip)
@@ -444,45 +474,108 @@ func (sm *ScanManager) scanIP(ip string) {
 	log.Printf("🚀 Starting scan pipeline for %s (types: %v, template ports: %s)",
 		ip, sm.currentScanOptions.ScanTypes, sm.currentScanOptions.PortRange)
 
-	var discoveredPorts []int
+	// PHASE 0: Fingerprinting (ping++ - host liveness and OS detection)
+	// Uses ping++ for ICMP/TCP probing and TTL-based OS detection.
+	// Discovered hosts are immediately submitted to the API for real-time visibility.
+	if contains(sm.currentScanOptions.ScanTypes, "fingerprint") {
+		log.Printf("📍 Phase 0: Fingerprinting scan on %s", ip)
+		startTime := time.Now()
+		fingerprintStrategy := sm.toolFactory.CreateFingerprintTool()
+		result, err := fingerprintStrategy.Fingerprint(ip)
+		duration := time.Since(startTime)
 
-	// PHASE 1: Port Discovery (RustScan - fast, broad discovery)
-	if contains(sm.currentScanOptions.ScanTypes, "discovery") {
-		log.Printf("📡 Phase 1: Discovery scan on %s", ip)
-		ports, err := sm.runDiscovery(ip)
 		if err != nil {
-			log.Printf("Discovery failed for %s: %v", ip, err)
-		} else if len(ports) > 0 {
-			discoveredPorts = ports
-			log.Printf("✅ Discovery found %d ports on %s: %v", len(ports), ip, ports)
+			log.Printf("Fingerprinting failed for %s: %v", ip, err)
+			sm.logger.LogToolExecution(sm.currentScanID, ip, "ping++", duration, false, map[string]interface{}{
+				"error": err.Error(),
+			})
+		} else if !result.IsAlive {
+			log.Printf("⚠️  Host %s appears to be down, skipping further scans", ip)
+			sm.logger.LogToolExecution(sm.currentScanID, ip, "ping++", duration, true, map[string]interface{}{
+				"is_alive": false,
+			})
+			log.Printf("Scan completed for %s (host down)", ip)
+			return
 		} else {
-			log.Printf("⚠️  Discovery found no open ports on %s", ip)
+			log.Printf("✅ Fingerprint: host=%s alive=%t os=%s ttl=%d", ip, result.IsAlive, result.OSFamily, result.TTL)
+
+			// Log tool execution success
+			sm.logger.LogToolExecution(sm.currentScanID, ip, "ping++", duration, true, map[string]interface{}{
+				"is_alive":  result.IsAlive,
+				"os_family": result.OSFamily,
+				"ttl":       result.TTL,
+			})
+
+			// Submit discovered host to API for real-time visibility
+			if err := sm.submitFingerprintResult(ip, result); err != nil {
+				log.Printf("Warning: failed to submit fingerprint data via API: %v", err)
+				// Continue execution even if API submission fails
+			} else {
+				log.Printf("Successfully submitted fingerprint discovery for %s", ip)
+			}
+
+			// Update KV store with discovered host
+			hostWasNew := false
+			if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+				if !contains(scan.Hosts, ip) {
+					scan.Hosts = append(scan.Hosts, ip)
+					hostWasNew = true
+				}
+				if scan.StartTime == "" {
+					scan.StartTime = time.Now().Format(time.RFC3339)
+				}
+				return nil
+			}); err != nil {
+				log.Printf("Warning: failed to update KV store with fingerprint discovery: %v", err)
+			}
+
+			// Log host discovered event
+			if hostWasNew {
+				sm.logger.LogHostDiscovered(ip, sm.currentScanID, map[string]interface{}{
+					"os_family":   result.OSFamily,
+					"ttl":         result.TTL,
+					"discovery":   "fingerprint",
+					"tool":        "ping++",
+					"is_alive":    result.IsAlive,
+					"confidence":  result.Details["confidence"],
+					"hops":        result.Details["hops"],
+				})
+			}
 		}
 	}
 
-	// PHASE 2: Port Enumeration (Naabu - detailed, accurate enumeration)
-	if contains(sm.currentScanOptions.ScanTypes, "enumeration") {
-		log.Printf("🔍 Phase 2: Enumeration scan on %s", ip)
-		ports, err := sm.runEnumeration(ip)
+	// Check for cancellation after fingerprint phase
+	if ctx.Err() != nil {
+		log.Printf("[SCAN] Cancelled after fingerprint phase for %s", ip)
+		return
+	}
+
+	var discoveredPorts []int
+
+	// PHASE 1: Port Enumeration (Naabu - fast, accurate port discovery)
+	// Supports both "enumeration" and "port_scan" scan types for backward compatibility
+	if contains(sm.currentScanOptions.ScanTypes, "enumeration") || contains(sm.currentScanOptions.ScanTypes, "port_scan") {
+		log.Printf("🔍 Phase 1: Port enumeration scan on %s", ip)
+		ports, err := sm.runEnumeration(ctx, ip)
 		if err != nil {
 			log.Printf("Enumeration failed for %s: %v", ip, err)
 		} else if len(ports) > 0 {
-			// Merge with discovery results (union of both)
-			if len(discoveredPorts) == 0 {
-				discoveredPorts = ports
-			} else {
-				// Simple merge - could be improved with deduplication
-				discoveredPorts = append(discoveredPorts, ports...)
-			}
+			discoveredPorts = ports
 			log.Printf("✅ Enumeration found %d ports on %s: %v", len(ports), ip, ports)
 		} else {
-			log.Printf("⚠️  Enumeration found no ports on %s", ip)
+			log.Printf("⚠️  Enumeration found no open ports on %s", ip)
 		}
 	}
 
-	// PHASE 3: Vulnerability Scanning (Nmap - uses discovered ports ONLY)
+	// Check for cancellation after enumeration phase
+	if ctx.Err() != nil {
+		log.Printf("[SCAN] Cancelled after enumeration phase for %s", ip)
+		return
+	}
+
+	// PHASE 2: Vulnerability Scanning (Nmap - uses discovered ports ONLY)
 	if contains(sm.currentScanOptions.ScanTypes, "vulnerability") {
-		log.Printf("🎯 Phase 3: Vulnerability scan on %s", ip)
+		log.Printf("🎯 Phase 2: Vulnerability scan on %s", ip)
 
 		// Determine which ports to scan
 		var portList string
@@ -502,7 +595,7 @@ func (sm *ScanManager) scanIP(ip string) {
 		}
 
 		// Run vulnerability scan with specific ports
-		if err := sm.runVulnerabilityWithPorts(ip, portList); err != nil {
+		if err := sm.runVulnerabilityWithPorts(ctx, ip, portList); err != nil {
 			log.Printf("Vulnerability scan failed for %s: %v", ip, err)
 		} else {
 			log.Printf("✅ Vulnerability scan completed for %s", ip)
@@ -542,10 +635,10 @@ func (sm *ScanManager) markHostComplete(ip string) error {
 }
 
 // runEnumeration performs the enumeration scan
-func (sm *ScanManager) runEnumeration(ip string) ([]int, error) {
+func (sm *ScanManager) runEnumeration(ctx context.Context, ip string) ([]int, error) {
 	startTime := time.Now()
 	enumStrategy := sm.toolFactory.CreateTool("enumeration")
-	enumResults, err := enumStrategy.Execute(ip)
+	enumResults, err := enumStrategy.ExecuteWithContext(ctx, ip)
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -611,16 +704,6 @@ func (sm *ScanManager) runEnumeration(ip string) ([]int, error) {
 	return enumeratedPorts, nil // Return enumerated ports for pipeline
 }
 
-// Helper function to check if a slice contains a string
-func contains(slice []string, str string) bool {
-	for _, s := range slice {
-		if s == str {
-			return true
-		}
-	}
-	return false
-}
-
 // portsToString converts []int{80, 443, 445} to "80,443,445"
 func portsToString(ports []int) string {
 	strPorts := make([]string, len(ports))
@@ -630,91 +713,13 @@ func portsToString(ports []int) string {
 	return strings.Join(strPorts, ",")
 }
 
-// runDiscovery performs the discovery scan and returns discovered ports
-func (sm *ScanManager) runDiscovery(ip string) ([]int, error) {
-	startTime := time.Now()
-	discoveryStrategy := sm.toolFactory.CreateTool("discovery")
-	discoveryResults, err := discoveryStrategy.Execute(ip)
-	duration := time.Since(startTime)
-
-	if err != nil {
-		sm.logger.LogToolExecution(sm.currentScanID, ip, "rustscan", duration, false, map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, fmt.Errorf("discovery scan failed for %s: %v", ip, err)
-	}
-
-	log.Printf("Discovery scan completed for %s. Found %d ports.", ip, len(discoveryResults.Ports))
-
-	// Extract discovered ports
-	discoveredPorts := make([]int, len(discoveryResults.Ports))
-	for i, port := range discoveryResults.Ports {
-		discoveredPorts[i] = port.Number
-	}
-
-	// Log tool execution success
-	sm.logger.LogToolExecution(sm.currentScanID, ip, "rustscan", duration, true, map[string]interface{}{
-		"ports_found": len(discoveredPorts),
-		"ports":       discoveredPorts,
-	})
-
-	// Only persist host if at least one port is found
-	if len(discoveredPorts) == 0 {
-		log.Printf("No open ports found for %s, not persisting host.", discoveryResults.IP)
-		sm.logger.LogScanEvent(sm.currentScanID, "no_ports_found", "No open ports found for host", map[string]interface{}{
-			"host_ip": ip,
-		})
-		return nil, nil // No ports found, but not an error
-	}
-
-	// Log host discovery
-	sm.logger.LogHostDiscovery(sm.currentScanID, ip, discoveredPorts, "rustscan")
-
-	// Determine the actual tool used based on scan type - discovery uses RustScan
-	toolName := "rustscan"
-
-	// Submit host data using the new source-aware API
-	if err := sm.submitHostWithSource(discoveryResults, toolName); err != nil {
-		log.Printf("Warning: failed to submit host data via source-aware API: %v", err)
-		log.Printf("This may indicate the API is not available or the endpoint is not implemented")
-		log.Printf("Will continue scan without database persistence")
-		// We don't return the error here since we want the scan to continue
-		// even if database operations fail
-	} else {
-		log.Printf("Successfully added host %s to database using source-aware API", discoveryResults.IP)
-	}
-
-	// Update KV store with the discovered host.
-	hostWasNew := false
-	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
-		if !contains(scan.Hosts, discoveryResults.IP) {
-			scan.Hosts = append(scan.Hosts, discoveryResults.IP)
-			hostWasNew = true
-		}
-		return nil
-	}); err != nil {
-		log.Printf("Warning: Failed to update scan results store for %s: %v", discoveryResults.IP, err)
-		// Still continue with the scan
-	}
-
-	// Log host discovered event (new event system)
-	if hostWasNew {
-		sm.logger.LogHostDiscovered(discoveryResults.IP, sm.currentScanID, map[string]interface{}{
-			"ports_found":    len(discoveredPorts),
-			"discovery_tool": "rustscan",
-		})
-	}
-
-	return discoveredPorts, nil // Return discovered ports for pipeline
-}
-
 // runVulnerability performs the vulnerability scan
-func (sm *ScanManager) runVulnerability(ip string) error {
-	return sm.runVulnerabilityWithPorts(ip, "")
+func (sm *ScanManager) runVulnerability(ctx context.Context, ip string) error {
+	return sm.runVulnerabilityWithPorts(ctx, ip, "")
 }
 
 // runVulnerabilityWithPorts performs vulnerability scan with optional port override
-func (sm *ScanManager) runVulnerabilityWithPorts(ip string, portList string) error {
+func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string, portList string) error {
 	startTime := time.Now()
 
 	// Override port range if specified (for discovered ports pipeline)
@@ -745,13 +750,18 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ip string, portList string) err
 	// Create vulnerability tool with script list
 	vulnStrategy := sm.toolFactory.CreateTool("vulnerability")
 
-	// If we have an nmap strategy and scripts, set the script list
-	if nmapStrat, ok := vulnStrategy.(*NmapStrategy); ok && len(scriptList) > 0 {
-		nmapStrat.ScriptList = scriptList
+	// If we have an nmap strategy, configure it with scripts and the current port range
+	if nmapStrat, ok := vulnStrategy.(*NmapStrategy); ok {
+		// Set scripts if available
+		if len(scriptList) > 0 {
+			nmapStrat.ScriptList = scriptList
+		}
+		// CRITICAL: Update the port range from currentScanOptions (which may have been overridden)
+		nmapStrat.PortRange = sm.currentScanOptions.PortRange
 		log.Printf("Configured Nmap strategy with %d scripts and port range: %s", len(scriptList), nmapStrat.PortRange)
 	}
 
-	vulnResults, err := vulnStrategy.Execute(ip)
+	vulnResults, err := vulnStrategy.ExecuteWithContext(ctx, ip)
 	duration := time.Since(startTime)
 
 	if err != nil {
@@ -853,6 +863,21 @@ func (sm *ScanManager) prepareTarget(target Target) ([]string, error) {
 	}
 }
 
+// GetActiveScanContext returns the context for the currently running scan.
+// Returns nil if no scan is active.
+func (sm *ScanManager) GetActiveScanContext() context.Context {
+	sm.scanMutex.Lock()
+	defer sm.scanMutex.Unlock()
+	return sm.activeScanCtx
+}
+
+// IsCancelling returns whether a cancellation is in progress
+func (sm *ScanManager) IsCancelling() bool {
+	sm.scanMutex.Lock()
+	defer sm.scanMutex.Unlock()
+	return sm.isCancelling
+}
+
 // Add a cleanup method to properly shut down the worker pool
 func (sm *ScanManager) Shutdown() {
 	sm.cancel()
@@ -885,12 +910,152 @@ func (m *ScanManager) SetScanOptions(options *ScanOptions) {
 	}
 }
 
-// Helper function to check if a slice contains a substring match
-func containsAny(slice []string, target string) bool {
-	for _, item := range slice {
-		if strings.Contains(strings.ToLower(item), strings.ToLower(target)) {
-			return true
-		}
+// ControlMessage represents a control command for the scanner
+type ControlMessage struct {
+	Action    string `json:"action"`    // Action to perform (e.g., "cancel")
+	ScanID    string `json:"scan_id"`   // Optional: specific scan to cancel
+	Timestamp string `json:"timestamp"` // When the command was issued
+}
+
+// ListenForCancelCommands starts listening for scan control commands on the scan_control queue.
+// This allows external systems (like the API) to cancel running scans.
+func (sm *ScanManager) ListenForCancelCommands() {
+	log.Printf("🎛️  Starting scan control listener on queue 'scan_control'")
+	queue.Listen("scan_control", sm.handleControlMessage)
+}
+
+// handleControlMessage processes incoming control commands
+func (sm *ScanManager) handleControlMessage(msg string) {
+	var cmd ControlMessage
+	if err := json.Unmarshal([]byte(msg), &cmd); err != nil {
+		log.Printf("Invalid control message: %v", err)
+		return
 	}
-	return false
+
+	log.Printf("📩 Received control command: action=%s, scan_id=%s, timestamp=%s",
+		cmd.Action, cmd.ScanID, cmd.Timestamp)
+
+	switch cmd.Action {
+	case "cancel":
+		sm.CancelCurrentScan(cmd.ScanID)
+	default:
+		log.Printf("Unknown control action: %s", cmd.Action)
+	}
+}
+
+// CancelCurrentScan cancels the currently running scan.
+// If scanID is provided, it only cancels if it matches the current scan.
+func (sm *ScanManager) CancelCurrentScan(scanID string) {
+	sm.scanMutex.Lock()
+	defer sm.scanMutex.Unlock()
+
+	// If a specific scan ID is provided, verify it matches
+	if scanID != "" && sm.currentScanID != "" && scanID != sm.currentScanID {
+		log.Printf("⚠️  Cancel request for scan %s, but current scan is %s - ignoring", scanID, sm.currentScanID)
+		return
+	}
+
+	if sm.activeScanCancel == nil {
+		log.Printf("⚠️  No active scan in memory to cancel")
+		// Still update ValKey to clear any stale scan data that might be stuck
+		sm.clearStaleScanData(scanID)
+		return
+	}
+
+	if sm.isCancelling {
+		log.Printf("⚠️  Scan is already being cancelled")
+		return
+	}
+
+	log.Printf("🛑 Cancelling scan %s...", sm.currentScanID)
+	sm.isCancelling = true
+
+	// Cancel the scan context - this will propagate to all workers and external commands
+	sm.activeScanCancel()
+
+	// Update scan status in ValKey
+	sm.updateScanStatus("cancelled")
+
+	// Log the cancellation event
+	sm.logger.LogScanEvent(sm.currentScanID, "scan_cancelled", "Scan was cancelled by user", map[string]interface{}{
+		"scan_id":   sm.currentScanID,
+		"timestamp": time.Now().Format(time.RFC3339),
+	})
+
+	log.Printf("✅ Scan %s has been cancelled", sm.currentScanID)
+}
+
+// updateScanStatus updates the scan status in ValKey
+func (sm *ScanManager) updateScanStatus(status string) {
+	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+		scan.Status = status
+		if status == "cancelled" {
+			scan.EndTime = time.Now().Format(time.RFC3339)
+		}
+		return nil
+	}); err != nil {
+		log.Printf("Warning: failed to update scan status to '%s': %v", status, err)
+	}
+}
+
+// clearStaleScanData marks any stale scan in ValKey as cancelled
+// This handles the case where the engine was restarted but ValKey still has old scan data
+func (sm *ScanManager) clearStaleScanData(scanID string) {
+	ctx := context.Background()
+
+	kvStore, err := store.NewValkeyStore()
+	if err != nil {
+		log.Printf("Warning: failed to connect to ValKey to clear stale data: %v", err)
+		return
+	}
+	defer kvStore.Close()
+
+	// Get current scan data from ValKey
+	resp, err := kvStore.GetValue(ctx, "currentScan")
+	if err != nil {
+		// No scan data to clear
+		log.Printf("✅ No stale scan data found in ValKey")
+		return
+	}
+
+	// Decode the base64 value (UI stores it as base64)
+	decodedBytes, err := decodeBase64(resp.Message.Value)
+	if err != nil {
+		// If decode fails, just delete the key
+		log.Printf("Warning: stale data is not valid base64, deleting key")
+		kvStore.DeleteValue(ctx, "currentScan")
+		return
+	}
+
+	// Parse the scan result
+	var scanResult map[string]interface{}
+	if err := json.Unmarshal(decodedBytes, &scanResult); err != nil {
+		log.Printf("Warning: stale data is not valid JSON, deleting key")
+		kvStore.DeleteValue(ctx, "currentScan")
+		return
+	}
+
+	// Update status to cancelled
+	scanResult["status"] = "cancelled"
+	scanResult["end_time"] = time.Now().Format(time.RFC3339)
+
+	updatedJSON, _ := json.Marshal(scanResult)
+	encodedValue := encodeBase64(updatedJSON)
+
+	if err := kvStore.SetValue(ctx, "currentScan", encodedValue); err != nil {
+		log.Printf("Warning: failed to update stale scan status: %v", err)
+		return
+	}
+
+	log.Printf("✅ Cleared stale scan data from ValKey (marked as cancelled)")
+}
+
+// decodeBase64 decodes a base64 string
+func decodeBase64(s string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(s)
+}
+
+// encodeBase64 encodes bytes to base64 string
+func encodeBase64(b []byte) string {
+	return base64.StdEncoding.EncodeToString(b)
 }

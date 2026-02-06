@@ -1,15 +1,47 @@
 # Scanner Scan Types Reference
 
-**Version:** 1.0  
-**Last Updated:** 2025-10-25
+**Version:** 2.0  
+**Last Updated:** 2026-01-24
 
 ## Overview
 
-The Sirius Scanner supports three distinct scan types, each using specific tools and methodologies. **These are the canonical names that MUST be used in templates and API requests.**
+The Sirius Scanner supports four distinct scan types, each using specific tools and methodologies. **These are the canonical names that MUST be used in templates and API requests.**
 
 ## Canonical Scan Types
 
-### 1. `enumeration`
+### 1. `fingerprint`
+
+**Tool:** ping++ (placeholder)  
+**Purpose:** Host liveness and OS detection  
+**Description:** Determines if a host is alive and identifies its operating system family using TTL-based detection and protocol probing.
+
+**When to use:**
+
+- Pre-scan host validation
+- Skip scanning dead hosts early
+- OS-specific scan optimization
+
+**Characteristics:**
+
+- 📍 Host liveness detection
+- 🖥️ TTL-based OS detection
+- ⚡ Very fast (ICMP/TCP probes)
+- 🚫 Skips dead hosts immediately
+
+**Status:** Placeholder implementation - full ping++ integration coming soon.
+
+**Example usage:**
+
+```json
+{
+  "scan_options": {
+    "scan_types": ["fingerprint", "enumeration", "vulnerability"],
+    "port_range": ""
+  }
+}
+```
+
+### 2. `enumeration` / `port_scan`
 
 **Tool:** NAABU  
 **Purpose:** Fast port enumeration  
@@ -28,6 +60,8 @@ The Sirius Scanner supports three distinct scan types, each using specific tools
 - 📊 Minimal resource usage
 - ✅ Scales well to many hosts
 
+**Note:** `port_scan` is an alias for `enumeration` for backward compatibility.
+
 **Example usage:**
 
 ```json
@@ -35,37 +69,6 @@ The Sirius Scanner supports three distinct scan types, each using specific tools
   "scan_options": {
     "scan_types": ["enumeration"],
     "port_range": "1-1000"
-  }
-}
-```
-
-### 2. `discovery`
-
-**Tool:** RustScan  
-**Purpose:** Host and service discovery  
-**Description:** Discovers active hosts, open ports, and attempts basic service identification.
-
-**When to use:**
-
-- Comprehensive host discovery
-- Service identification needed
-- Balanced speed vs. detail
-- Unknown network topology
-
-**Characteristics:**
-
-- 🔍 Host discovery + port scanning
-- 🏷️ Basic service detection
-- ⚡ Fast (faster than Nmap)
-- 🎯 Good for initial reconnaissance
-
-**Example usage:**
-
-```json
-{
-  "scan_options": {
-    "scan_types": ["discovery"],
-    "port_range": "1-10000"
   }
 }
 ```
@@ -119,12 +122,12 @@ Fast port scan followed by targeted vulnerability assessment.
 
 ```json
 {
-  "scan_types": ["enumeration", "discovery", "vulnerability"],
-  "port_range": "1-10000"
+  "scan_types": ["fingerprint", "enumeration", "vulnerability"],
+  "port_range": ""
 }
 ```
 
-Full reconnaissance: enumerate ports, discover services, scan for vulnerabilities.
+Full reconnaissance: check host liveness, enumerate ports, scan for vulnerabilities.
 
 ### Vulnerability-Only
 
@@ -141,11 +144,11 @@ Target specific known ports for in-depth vulnerability scanning.
 
 When multiple scan types are specified, they execute in sequence:
 
-1. **enumeration** (if specified)
-2. **discovery** (if specified)
-3. **vulnerability** (if specified)
+0. **fingerprint** (if specified) - Check if host is alive
+1. **enumeration/port_scan** (if specified) - Find open ports
+2. **vulnerability** (if specified) - Scan for vulnerabilities
 
-Each phase can inform the next (e.g., enumeration finds ports for discovery).
+Each phase can inform the next (e.g., fingerprint skips dead hosts, enumeration finds ports for vulnerability scanning).
 
 ## Port Range Interaction
 
@@ -153,19 +156,18 @@ Each scan type respects the `port_range` setting from the template:
 
 | Scan Type       | Port Range Usage                            |
 | --------------- | ------------------------------------------- |
+| `fingerprint`   | N/A (uses ICMP/TCP probes)                  |
 | `enumeration`   | NAABU scans specified ports                 |
-| `discovery`     | RustScan scans specified ports              |
 | `vulnerability` | Nmap scans specified ports with NSE scripts |
 
 ## Invalid Scan Type Names
 
 **DO NOT USE:**
 
-- ❌ `service-detection` → Use `discovery`
+- ❌ `discovery` → Removed (was RustScan)
+- ❌ `service-detection` → Use `enumeration`
 - ❌ `vuln-scan` → Use `vulnerability`
-- ❌ `port-scan` → Use `enumeration`
 - ❌ `nmap` → Use `vulnerability`
-- ❌ `rustscan` → Use `discovery`
 - ❌ `naabu` → Use `enumeration`
 
 **Why strict naming?**
@@ -197,8 +199,8 @@ Each scan type respects the `port_range` setting from the template:
   "id": "high-risk",
   "name": "High Risk Scan",
   "scan_options": {
-    "scan_types": ["enumeration", "discovery", "vulnerability"],
-    "port_range": "1-10000"
+    "scan_types": ["fingerprint", "enumeration", "vulnerability"],
+    "port_range": ""
   }
 }
 ```
@@ -210,7 +212,7 @@ Each scan type respects the `port_range` setting from the template:
   "id": "all",
   "name": "Comprehensive Scan",
   "scan_options": {
-    "scan_types": ["enumeration", "discovery", "vulnerability"],
+    "scan_types": ["fingerprint", "enumeration", "vulnerability"],
     "port_range": "1-65535"
   }
 }
@@ -240,7 +242,7 @@ POST /api/templates
 {
   "name": "My Custom Template",
   "scan_options": {
-    "scan_types": ["service-detection", "vuln-scan"], // ❌ WRONG
+    "scan_types": ["discovery", "vuln-scan"], // ❌ WRONG - discovery removed
     "port_range": "1-1000"
   }
 }
@@ -266,11 +268,13 @@ POST /api/scans
 The scanner validates scan types and will **reject** unrecognized names:
 
 **Valid:**
+✅ `fingerprint`  
 ✅ `enumeration`  
-✅ `discovery`  
+✅ `port_scan`  
 ✅ `vulnerability`
 
 **Invalid:**
+❌ `discovery` (removed)  
 ❌ Any other string value
 
 **Error behavior:**
@@ -286,20 +290,23 @@ When building UI components for template creation:
 ```typescript
 // types/scanner.ts
 export enum ScanType {
+  FINGERPRINT = "fingerprint",
   ENUMERATION = "enumeration",
-  DISCOVERY = "discovery",
+  PORT_SCAN = "port_scan",
   VULNERABILITY = "vulnerability",
 }
 
 export const SCAN_TYPE_LABELS: Record<ScanType, string> = {
+  [ScanType.FINGERPRINT]: "Host Fingerprinting (ping++)",
   [ScanType.ENUMERATION]: "Port Enumeration (NAABU)",
-  [ScanType.DISCOVERY]: "Service Discovery (RustScan)",
+  [ScanType.PORT_SCAN]: "Port Scan (NAABU)",
   [ScanType.VULNERABILITY]: "Vulnerability Scan (Nmap + NSE)",
 };
 
 export const SCAN_TYPE_DESCRIPTIONS: Record<ScanType, string> = {
+  [ScanType.FINGERPRINT]: "Check host liveness and detect OS family",
   [ScanType.ENUMERATION]: "Fast port scanning to identify open ports",
-  [ScanType.DISCOVERY]: "Discover hosts and services with basic identification",
+  [ScanType.PORT_SCAN]: "Alias for enumeration",
   [ScanType.VULNERABILITY]:
     "Deep security scanning for vulnerabilities and CVEs",
 };
@@ -308,13 +315,15 @@ export const SCAN_TYPE_DESCRIPTIONS: Record<ScanType, string> = {
 ```tsx
 // UI Component
 <Select label="Scan Types" multiple>
+  <Option value="fingerprint">
+    <strong>Host Fingerprinting</strong>
+    <small>
+      Check host liveness and OS detection with ping++ (coming soon)
+    </small>
+  </Option>
   <Option value="enumeration">
     <strong>Port Enumeration</strong>
     <small>Fast port scanning with NAABU</small>
-  </Option>
-  <Option value="discovery">
-    <strong>Service Discovery</strong>
-    <small>Host and service discovery with RustScan</small>
   </Option>
   <Option value="vulnerability">
     <strong>Vulnerability Scan</strong>
@@ -338,10 +347,10 @@ docker logs sirius-engine | grep "Unknown scan type"
 **If you see:**
 
 ```
-⚠️ Unknown scan type 'service-detection' for 192.168.1.100
+⚠️ Unknown scan type 'discovery' for 192.168.1.100
 ```
 
-**Solution:** Update template to use canonical scan type names.
+**Solution:** Update template to use new scan types (`discovery` has been removed).
 
 ### Port Range Ignored
 
@@ -367,7 +376,7 @@ curl -X POST http://localhost:9001/api/templates \
     "id": "test-scan-types",
     "name": "Test Scan Types",
     "scan_options": {
-      "scan_types": ["enumeration", "discovery", "vulnerability"],
+      "scan_types": ["fingerprint", "enumeration", "vulnerability"],
       "port_range": "80,443"
     }
   }'
@@ -381,47 +390,58 @@ curl -X POST http://localhost:9001/api/scans \
   }'
 
 # Check logs for execution
-docker logs sirius-engine | grep "Running scan type"
+docker logs sirius-engine | grep "Phase"
 
 # Expected output:
-#   → Running scan type 'enumeration' for 192.168.1.100
-#   → Running scan type 'discovery' for 192.168.1.100
-#   → Running scan type 'vulnerability' for 192.168.1.100
+#   📍 Phase 0: Fingerprinting scan on 192.168.1.100
+#   🔍 Phase 1: Port enumeration scan on 192.168.1.100
+#   🎯 Phase 2: Vulnerability scan on 192.168.1.100
 ```
 
 ## Future Enhancements
 
-Potential additions to scan type system:
+### ping++ Integration (Coming Soon)
+
+The `fingerprint` scan type will be fully implemented with the ping++ tool:
+
+- ICMP ping probes for host liveness
+- TTL-based OS detection (64=Linux/Mac, 128=Windows)
+- TCP SYN probes for firewall-blocked ICMP
+- SMB enumeration for Windows hosts (port 445)
+- Template-based modular detection
+
+### Other Potential Additions
 
 1. **Scan Type Profiles**
-
    - Predefined combinations (quick, thorough, paranoid)
    - User-friendly names mapping to canonical types
 
 2. **Conditional Execution**
-
-   - Run `vulnerability` only if `discovery` finds services
+   - Run `vulnerability` only if `enumeration` finds ports
    - Smart skip logic based on previous phases
 
-3. **Parallel Execution**
-
-   - Run multiple scan types simultaneously
-   - Requires careful resource management
-
-4. **Custom Scan Types**
+3. **Custom Scan Types**
    - Allow plugins to register new scan types
    - Extensible scan type system
 
 ## References
 
 - **NAABU**: https://github.com/projectdiscovery/naabu
-- **RustScan**: https://github.com/RustScan/RustScan
 - **Nmap**: https://nmap.org/
 - **NSE Scripts**: https://nmap.org/book/nse.html
+- **ping++**: /Users/oz/Projects/Sirius-Project/minor-projects/ping++ (in development)
 
 ## Changelog
 
-### 2025-10-25
+### 2026-01-24 (v2.0)
+
+- Removed `discovery` scan type (RustScan removed)
+- Added `fingerprint` scan type placeholder for ping++
+- Added `port_scan` as alias for `enumeration`
+- Updated scan pipeline to Naabu-only for port discovery
+- Updated examples and UI integration code
+
+### 2025-10-25 (v1.0)
 
 - Initial documentation
 - Defined three canonical scan types

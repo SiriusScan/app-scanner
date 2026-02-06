@@ -3,6 +3,7 @@ package nmap
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"os"
@@ -17,10 +18,12 @@ import (
 
 // ScanConfig holds configuration for the Nmap scan
 type ScanConfig struct {
-	Target     string   // Target to scan
-	Protocols  []string // Protocols to select scripts for (deprecated, use ScriptList)
-	ScriptList []string // Explicit list of scripts to run (overrides Protocols)
-	PortRange  string   // Explicit port range (e.g., "1-1000", "80,443,3389")
+	Target            string          // Target to scan
+	Protocols         []string        // Protocols to select scripts for (deprecated, use ScriptList)
+	ScriptList        []string        // Explicit list of scripts to run (overrides Protocols)
+	PortRange         string          // Explicit port range (e.g., "1-1000", "80,443,3389")
+	SkipHostDiscovery bool            // When true, use -Pn flag (skip host discovery, assume online)
+	Ctx               context.Context // Context for cancellation support
 }
 
 // Scan is a function variable that can be overridden for testing.
@@ -36,10 +39,25 @@ func ScanWithConfig(config ScanConfig) (sirius.Host, error) {
 	// Initialize an empty sirius.Host object
 	host := sirius.Host{}
 
+	// Ensure context is set (use background if not provided for backward compatibility)
+	if config.Ctx == nil {
+		config.Ctx = context.Background()
+	}
+
+	// Check for cancellation before starting
+	if config.Ctx.Err() != nil {
+		return host, fmt.Errorf("scan cancelled before starting")
+	}
+
 	// Execute Nmap and capture stdout
 	output, err := executeNmapWithConfig(config)
 	if err != nil {
 		return host, err
+	}
+
+	// Check for cancellation after scan completes
+	if config.Ctx.Err() != nil {
+		return host, fmt.Errorf("scan cancelled")
 	}
 
 	// Process the XML data
@@ -103,9 +121,9 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	// Potential script args file locations
 	argsFilePaths := []string{
 		"/opt/sirius/nse/sirius-nse/scripts/args.txt", // Docker NSE path
-		"/app-scanner/nmap-args/args.txt",             // Docker app-scanner path (production)
-		"/app-scanner-src/nmap-args/args.txt",         // Docker app-scanner-src path (development)
-		"nmap-args/args.txt",                          // Local path (relative to working directory)
+		"/app-scanner/modules/nmap/args/args.txt",     // Docker app-scanner path (production)
+		"/app-scanner-src/modules/nmap/args/args.txt", // Docker app-scanner-src path (development)
+		"modules/nmap/args/args.txt",                  // Local path (relative to working directory)
 	}
 
 	// Find the first args file that exists
@@ -121,12 +139,17 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	args := []string{
 		"-T4", // Timing template (higher is faster)
 		"-sV", // Version detection
-		"-Pn", // Treat all hosts as online
 	}
 
 	// Port specification MUST be provided (from discovered ports or template)
 	if config.PortRange == "" {
-		return "", fmt.Errorf("no port range specified - vulnerability scanning requires explicit ports from discovery or template")
+		return "", fmt.Errorf("no port range specified - vulnerability scanning requires explicit ports from enumeration phase or template")
+	}
+
+	// Only skip host discovery (-Pn) when explicitly requested OR when ports are from enumeration
+	// This allows Nmap to be faster when we already know the host is up and which ports are open
+	if config.SkipHostDiscovery || config.PortRange != "" {
+		args = append(args, "-Pn") // Skip host discovery - we know host is up from enumeration
 	}
 
 	fmt.Printf("📌 Using port range: %s\n", config.PortRange)
@@ -146,13 +169,31 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	// Log the full Nmap command for debugging
 	fmt.Printf("🔍 Executing Nmap command: nmap %s\n", strings.Join(args, " "))
 
-	cmd := exec.Command("nmap", args...)
+	// #region agent log
+	// Debug: Log context state before starting Nmap
+	if config.Ctx == nil {
+		fmt.Println("⚠️  [DEBUG] Nmap starting with NIL context - cancellation will NOT work!")
+	} else if config.Ctx == context.Background() {
+		fmt.Println("⚠️  [DEBUG] Nmap starting with context.Background() - cancellation will NOT work!")
+	} else {
+		fmt.Println("✅ [DEBUG] Nmap starting with cancellable context")
+	}
+	// #endregion
+
+	// Use CommandContext for cancellation support
+	cmd := exec.CommandContext(config.Ctx, "nmap", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	fmt.Println("⏳ Running Nmap scan (this may take several minutes)...")
 	if err := cmd.Run(); err != nil {
+		// Check if context was cancelled
+		if config.Ctx.Err() != nil {
+			fmt.Println("🛑 Nmap scan cancelled")
+			return "", fmt.Errorf("scan cancelled: %w", config.Ctx.Err())
+		}
+
 		stderrStr := stderr.String()
 
 		// Check if the error is due to NSE script issues (non-fatal)
@@ -179,12 +220,17 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 func executeFallbackScan(config ScanConfig) (string, error) {
 	fmt.Println("🛡️  Running fallback scan with minimal safe scripts...")
 
+	// Port range is required - use the same ports from the original scan config
+	if config.PortRange == "" {
+		return "", fmt.Errorf("fallback scan failed: no port range specified - cannot run without explicit ports")
+	}
+
 	// Build minimal safe command - just version detection and basic info
 	args := []string{
-		"-T4",          // Timing template
-		"-sV",          // Version detection
-		"-Pn",          // Treat all hosts as online
-		"-p", "1-1000", // Standard port range
+		"-T4",                  // Timing template
+		"-sV",                  // Version detection
+		"-Pn",                  // Treat all hosts as online (fallback assumes we know host is up)
+		"-p", config.PortRange, // Use the same ports from original config
 	}
 
 	// Only use the most reliable default scripts (use names, not paths)
@@ -200,12 +246,22 @@ func executeFallbackScan(config ScanConfig) (string, error) {
 	// Add target and output format
 	args = append(args, config.Target, "-oX", "-", "-v")
 
-	cmd := exec.Command("nmap", args...)
+	// Use CommandContext for cancellation support (use background if no context provided)
+	ctx := config.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	cmd := exec.CommandContext(ctx, "nmap", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("fallback scan cancelled: %w", ctx.Err())
+		}
 		// If even the fallback scan fails, return a basic error
 		return "", fmt.Errorf("fallback scan also failed: %w\nStderr: %s", err, stderr.String())
 	}

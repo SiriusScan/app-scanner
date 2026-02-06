@@ -1,19 +1,20 @@
 module github.com/SiriusScan/app-scanner
 
-go 1.23.0
+go 1.24.0
 
 toolchain go1.24.1
 
 replace github.com/SiriusScan/go-api => ../go-api //Development
 
+replace github.com/SiriusScan/ping++ => ../ping++ //Development
+
 require (
 	github.com/SiriusScan/go-api v0.0.11
+	github.com/SiriusScan/ping++ v0.0.0
 	github.com/lair-framework/go-nmap v0.0.0-20191202052157-3507e0b03523
 	github.com/projectdiscovery/goflags v0.1.68
 	github.com/projectdiscovery/naabu/v2 v2.3.4
-	github.com/stretchr/testify v1.9.0
-	gorm.io/driver/postgres v1.5.11
-	gorm.io/gorm v1.25.12
+	github.com/stretchr/testify v1.10.0
 )
 
 require (
@@ -48,13 +49,19 @@ require (
 	github.com/google/go-github/v30 v30.1.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
-	github.com/google/uuid v1.3.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/gopacket/gopacket v1.2.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect
 	github.com/jackc/pgx/v5 v5.5.5 // indirect
 	github.com/jackc/puddle/v2 v2.2.1 // indirect
+	github.com/jfjallid/go-smb v0.6.7 // indirect
+	github.com/jfjallid/gofork v1.7.6 // indirect
+	github.com/jfjallid/gokrb5/v8 v8.5.1 // indirect
+	github.com/jfjallid/golog v0.3.3 // indirect
+	github.com/jfjallid/mstypes v0.0.1 // indirect
+	github.com/jfjallid/ndr v0.0.1 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -97,6 +104,7 @@ require (
 	github.com/projectdiscovery/retryablehttp-go v1.0.96 // indirect
 	github.com/projectdiscovery/uncover v1.0.9 // indirect
 	github.com/projectdiscovery/utils v0.4.6 // indirect
+	github.com/prometheus-community/pro-bing v0.5.0 // indirect
 	github.com/refraction-networking/utls v1.6.7 // indirect
 	github.com/remeh/sizedwaitgroup v1.0.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
@@ -128,19 +136,21 @@ require (
 	github.com/zmap/zcrypto v0.0.0-20230814193918-dbe676986518 // indirect
 	go.etcd.io/bbolt v1.3.7 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.36.0 // indirect
+	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
 	golang.org/x/mod v0.24.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/net v0.39.0 // indirect
 	golang.org/x/oauth2 v0.18.0 // indirect
-	golang.org/x/sync v0.12.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/term v0.30.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/sync v0.13.0 // indirect
+	golang.org/x/sys v0.32.0 // indirect
+	golang.org/x/term v0.31.0 // indirect
+	golang.org/x/text v0.24.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.31.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/djherbis/times.v1 v1.3.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	gorm.io/driver/postgres v1.5.11 // indirect
+	gorm.io/gorm v1.25.12 // indirect
 )
