@@ -5,6 +5,7 @@ app-scanner
 *.bin
 
 # Build artifacts
+tmp/
 *.o
 *.a
 *.so
