@@ -20,6 +20,7 @@ import (
 
 	"github.com/SiriusScan/app-scanner/internal/nse"
 	"github.com/SiriusScan/go-api/sirius"
+	"github.com/SiriusScan/go-api/sirius/infraauth"
 	"github.com/SiriusScan/go-api/sirius/postgres/models"
 	"github.com/SiriusScan/go-api/sirius/queue"
 	"github.com/SiriusScan/go-api/sirius/store"
@@ -290,9 +291,12 @@ func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) e
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	serviceKey := strings.TrimSpace(os.Getenv("SIRIUS_API_KEY"))
+	serviceKey, keyErr := infraauth.LoadSiriusAPIKey()
+	if keyErr != nil {
+		return fmt.Errorf("internal API key required for scanner API calls: %w", keyErr)
+	}
 	if serviceKey == "" {
-		return fmt.Errorf("SIRIUS_API_KEY is required for scanner API calls")
+		return fmt.Errorf("internal API key required for scanner API calls (empty key)")
 	}
 	req.Header.Set("X-API-Key", serviceKey)
 
