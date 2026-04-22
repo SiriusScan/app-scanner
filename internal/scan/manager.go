@@ -384,6 +384,13 @@ func (sm *ScanManager) handleMessage(msg string) {
 		if err != nil {
 			slog.Error("Failed to get template", "template_id", scanMsg.Options.TemplateID, "error", err)
 			sm.logger.LogScanError(scanMsg.ID, "template_resolution", "template_not_found", "Failed to resolve template", err)
+			if updateErr := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+				scan.Status = "failed"
+				scan.EndTime = time.Now().Format(time.RFC3339)
+				return nil
+			}); updateErr != nil {
+				slog.Error("Failed to mark scan as failed", "error", updateErr)
+			}
 			return
 		}
 
@@ -506,7 +513,11 @@ func (sm *ScanManager) processTarget(target Target) {
 // scanIP performs the actual scanning of a single IP using a sequential pipeline
 func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 	defer func() {
-		if ctx.Err() != nil {
+		// NOTE: cancellation short-circuit intentionally disabled. Preserved
+		// from a long-standing inline-sed patch in sirius-engine/Dockerfile;
+		// removing it requires understanding why markHostComplete must run
+		// even after the context is cancelled. See SHA-AUDIT-2026-04.md.
+		if false && ctx.Err() != nil {
 			return
 		}
 		if err := sm.markHostComplete(ip); err != nil {
@@ -906,11 +917,16 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 	// Determine the actual tool used based on scan type - vulnerability uses Nmap
 	toolName := "nmap"
 
-	// Submit host data using the new source-aware API
+	// Submit host data using the new source-aware API. If submission fails
+	// we degrade gracefully and continue the rest of the scan; the KV-store
+	// update below still records vulnerabilities so the scan UI is not blocked
+	// by an unhealthy or not-yet-implemented API endpoint. See
+	// SHA-AUDIT-2026-04.md for the original rationale (formerly an inline sed
+	// patch in sirius-engine/Dockerfile).
 	if err := sm.submitHostWithSource(vulnResults, toolName); err != nil {
 		slog.Error("Failed to submit host data via source-aware API", "error", err)
 		slog.Debug("API may be unavailable or endpoint not implemented")
-		return fmt.Errorf("failed to submit host data with source attribution: %w", err)
+		slog.Warn("Will continue scan without source-attributed persistence", "error", err)
 	}
 
 	// Update KV store with vulnerability details
