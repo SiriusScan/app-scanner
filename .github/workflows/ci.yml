@@ -11,16 +11,37 @@ jobs:
     name: Test & Lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout app-scanner
         uses: actions/checkout@v4
+        with:
+          path: app-scanner
+
+      # go.mod uses replace github.com/SiriusScan/go-api => ../go-api and
+      # replace github.com/SiriusScan/ping++ => ../ping++ for in-cluster dev.
+      # Check both out as siblings so the replace directives resolve in CI.
+      - name: Checkout go-api sibling
+        uses: actions/checkout@v4
+        with:
+          repository: SiriusScan/go-api
+          ref: main
+          path: go-api
+
+      - name: Checkout pingpp sibling (replaces ping++)
+        uses: actions/checkout@v4
+        with:
+          repository: SiriusScan/pingpp
+          ref: main
+          path: ping++
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
           cache: true
+          cache-dependency-path: app-scanner/go.sum
 
       - name: Install Dependencies
+        working-directory: app-scanner
         run: go mod download
 
       - name: Run golangci-lint
@@ -28,9 +49,14 @@ jobs:
         with:
           version: v1.63.4
           args: --timeout=5m
+          working-directory: app-scanner
 
       - name: Test
-        run: go test -v -race ./... # Assuming standard tests exist
+        working-directory: app-scanner
+        # -short skips integration tests that require live targets or the
+        # /sirius-nse manifest fixture (only present inside the engine
+        # container). All unit tests still run.
+        run: go test -v -race -short ./...
 
       - name: Send repository_dispatch to Sirius main repo
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

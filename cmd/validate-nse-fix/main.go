@@ -10,7 +10,8 @@ import (
 
 func main() {
 	fmt.Println("🔍 NSE Fix Validation Tool")
-	fmt.Println("============================\n")
+	fmt.Println("============================")
+	fmt.Println()
 
 	// Test 1: Script Selector with Wildcard
 	fmt.Println("Test 1: Wildcard Script Selection")
@@ -54,7 +55,8 @@ func main() {
 	fmt.Println("✅ nmap.ScanWithConfig - Available")
 	fmt.Println("✅ nmap.ScanConfig - Available")
 	fmt.Println("✅ Fallback scan function - Implemented")
-	fmt.Println("✅ Script path configuration - Implemented\n")
+	fmt.Println("✅ Script path configuration - Implemented")
+	fmt.Println()
 
 	// Test 4: Configuration test
 	fmt.Println("Test 4: Configuration Validation")
