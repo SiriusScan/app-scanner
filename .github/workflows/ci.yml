@@ -40,6 +40,11 @@ jobs:
           cache: true
           cache-dependency-path: app-scanner/go.sum
 
+      # gopacket/pcap requires CGO and libpcap headers to compile, otherwise
+      # both `go test` and golangci-lint fail to load the package.
+      - name: Install libpcap (required by gopacket)
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
       - name: Install Dependencies
         working-directory: app-scanner
         run: go mod download
