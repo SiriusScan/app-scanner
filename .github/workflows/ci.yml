@@ -47,7 +47,9 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.63.4
+          # v1.63 is built against Go 1.23; bump to v1.64.8 which supports
+          # the Go 1.24 toolchain this module targets.
+          version: v1.64.8
           args: --timeout=5m
           working-directory: app-scanner
 
