@@ -18,6 +18,21 @@ const (
 	scriptContentPrefix = "nse:script"
 )
 
+// canonicalScriptID mirrors sirius-ui/src/utils/nseScriptIds.ts. It strips
+// any directory prefix and a trailing .nse extension so Valkey keys written
+// by the scanner align with what the UI looks up after canonicalization.
+// Inputs like "scripts/foo/bar.nse", "bar.nse", and "bar" all resolve to "bar".
+// The wildcard "*" and the empty string pass through unchanged.
+func canonicalScriptID(id string) string {
+	if id == "" || id == "*" {
+		return id
+	}
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
+	}
+	return strings.TrimSuffix(id, ".nse")
+}
+
 // builtInRepositoryManifest stores the default repository manifest independent of process CWD.
 //
 //go:embed manifest.json
@@ -163,8 +178,13 @@ func extractScriptContent(content string) string {
 
 // syncScriptContent synchronizes a single script's content
 func (sm *SyncManager) syncScriptContent(repoBasePath, id string, script Script) error {
+	// Canonicalize the script ID for all KV operations so the on-disk
+	// manifest entry (which may include a .nse extension) maps to the same
+	// key shape the UI looks up.
+	canonicalID := canonicalScriptID(id)
+
 	// Get script content from ValKey first (highest priority)
-	globalContent, err := sm.getScriptContent(context.Background(), id)
+	globalContent, err := sm.getScriptContent(context.Background(), canonicalID)
 	if err != nil && !strings.Contains(err.Error(), "not found") {
 		return fmt.Errorf("failed to get script content from ValKey: %w", err)
 	}
@@ -205,17 +225,39 @@ func (sm *SyncManager) syncScriptContent(repoBasePath, id string, script Script)
 	}
 
 	// Update ValKey with local content
-	if err := sm.updateScriptContent(context.Background(), id, newContent); err != nil {
+	if err := sm.updateScriptContent(context.Background(), canonicalID, newContent); err != nil {
 		return fmt.Errorf("failed to update script content in ValKey: %w", err)
 	}
 
 	return nil
 }
 
-// updateValKeyManifest updates the manifest in ValKey store
+// updateValKeyManifest updates the manifest in ValKey store. Script map keys
+// are rewritten to their canonical form (no .nse extension, no path prefix)
+// so the UI's canonicalized lookups resolve to the same identifiers the
+// scanner uses for nse:script:* content keys. Each entry's Path field is
+// preserved unchanged because it represents the on-disk file location.
 func (sm *SyncManager) updateValKeyManifest(ctx context.Context, manifest *Manifest) error {
+	canonicalManifest := *manifest
+	if len(manifest.Scripts) > 0 {
+		canonicalScripts := make(map[string]Script, len(manifest.Scripts))
+		for id, script := range manifest.Scripts {
+			canonicalID := canonicalScriptID(id)
+			if existing, ok := canonicalScripts[canonicalID]; ok {
+				slog.Warn("duplicate canonical script id in manifest; keeping first entry",
+					"canonical_id", canonicalID,
+					"kept_path", existing.Path,
+					"discarded_path", script.Path,
+				)
+				continue
+			}
+			canonicalScripts[canonicalID] = script
+		}
+		canonicalManifest.Scripts = canonicalScripts
+	}
+
 	// First marshal the manifest to JSON
-	manifestJSON, err := json.Marshal(manifest)
+	manifestJSON, err := json.Marshal(&canonicalManifest)
 	if err != nil {
 		return fmt.Errorf("failed to marshal manifest: %w", err)
 	}
@@ -230,6 +272,7 @@ func (sm *SyncManager) updateValKeyManifest(ctx context.Context, manifest *Manif
 
 // getScriptContent retrieves a script's content from the KV store
 func (sm *SyncManager) getScriptContent(ctx context.Context, scriptName string) (string, error) {
+	scriptName = canonicalScriptID(scriptName)
 	resp, err := sm.kvStore.GetValue(ctx, fmt.Sprintf("%s:%s", scriptContentPrefix, scriptName))
 	if err != nil {
 		if strings.Contains(err.Error(), "valkey nil message") {
@@ -245,6 +288,7 @@ func (sm *SyncManager) getScriptContent(ctx context.Context, scriptName string) 
 
 // updateScriptContent updates a script's content in the KV store
 func (sm *SyncManager) updateScriptContent(ctx context.Context, scriptID string, content *ScriptContent) error {
+	scriptID = canonicalScriptID(scriptID)
 	key := ValKeyScriptPrefix + scriptID
 
 	// First marshal the content to JSON
@@ -261,21 +305,30 @@ func (sm *SyncManager) updateScriptContent(ctx context.Context, scriptID string,
 	return nil
 }
 
-// UpdateScriptFromUI updates a script's content and metadata from the UI
+// UpdateScriptFromUI updates a script's content and metadata from the UI.
+// The incoming scriptID may be the canonical id ("foo") or the legacy
+// extension form ("foo.nse"); both resolve to the same Valkey key.
 func (sm *SyncManager) UpdateScriptFromUI(ctx context.Context, scriptID string, content *ScriptContent) error {
-	// Validate that the script exists in the manifest
+	canonicalID := canonicalScriptID(scriptID)
+
+	// Validate that the script exists in the manifest. Look up by canonical
+	// id, and fall back to the raw id to tolerate manifests that haven't
+	// been re-synced into canonical form yet.
 	manifest, err := sm.repoManager.GetManifest()
 	if err != nil {
 		return fmt.Errorf("failed to get manifest: %w", err)
 	}
 
-	script, exists := manifest.Scripts[scriptID]
+	script, exists := manifest.Scripts[canonicalID]
+	if !exists {
+		script, exists = manifest.Scripts[scriptID]
+	}
 	if !exists {
 		return fmt.Errorf("script %s not found in manifest", scriptID)
 	}
 
 	// Update the script content in ValKey
-	if err := sm.updateScriptContent(ctx, scriptID, content); err != nil {
+	if err := sm.updateScriptContent(ctx, canonicalID, content); err != nil {
 		return fmt.Errorf("failed to update script content: %w", err)
 	}
 

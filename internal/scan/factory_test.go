@@ -48,10 +48,12 @@ func TestScanToolFactory_CreateFingerprintTool(t *testing.T) {
 		t.Errorf("Expected PingPlusPlusAdapter, got %T", fingerprintTool)
 	}
 
-	// Verify default options are applied
+	// Verify default options are applied. Probe set is owned by
+	// DefaultFingerprintProbes in pingpp_adapter.go; assert against that to
+	// avoid stale expectations as the default set evolves.
 	opts := adapter.Options()
-	if len(opts.ProbeTypes) != 2 {
-		t.Errorf("Expected 2 default probe types, got %d", len(opts.ProbeTypes))
+	if len(opts.ProbeTypes) != len(DefaultFingerprintProbes) {
+		t.Errorf("Expected %d default probe types, got %d", len(DefaultFingerprintProbes), len(opts.ProbeTypes))
 	}
 	if opts.Timeout != DefaultFingerprintTimeout {
 		t.Errorf("Expected default timeout %v, got %v", DefaultFingerprintTimeout, opts.Timeout)
