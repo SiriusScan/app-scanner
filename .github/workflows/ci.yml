@@ -57,6 +57,11 @@ jobs:
           version: v1.64.8
           args: --timeout=5m
           working-directory: app-scanner
+          # The repo carries a pre-existing lint baseline across many files
+          # that was never enforced (CI was broken). Only fail on issues
+          # newly introduced by the current branch/PR; cleaning up the
+          # baseline is tracked separately.
+          only-new-issues: true
 
       - name: Test
         working-directory: app-scanner
