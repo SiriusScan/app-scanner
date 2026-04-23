@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/SiriusScan/go-api/sirius/store/templates"
 )
 
 const (
@@ -16,14 +18,17 @@ const (
 	DefaultNSEBasePath = "/sirius-nse"
 	// ManifestFile is the name of the manifest file
 	ManifestFile = "manifest.json"
-	// ValKeyManifestKey is the key used to store the manifest in ValKey
-	ValKeyManifestKey = "nse:manifest"
-	// ValKeyRepoManifestKey is the key used to store the repository manifest in ValKey
-	ValKeyRepoManifestKey = "nse:repo-manifest"
-	// ValKeyScriptPrefix is the prefix for script content keys in ValKey
-	ValKeyScriptPrefix = "nse:script:"
-	// ValKeyScriptMetaPrefix is the prefix for script metadata keys in ValKey
-	ValKeyScriptMetaPrefix = "nse:meta:"
+)
+
+// Valkey keys are sourced from the shared go-api/sirius/store/templates
+// package so every producer/consumer agrees on namespacing without
+// having to copy string literals around. Kept as package-level aliases
+// for backwards compatibility with existing call sites in tests.
+const (
+	ValKeyManifestKey      = templates.KeyNseManifest
+	ValKeyRepoManifestKey  = templates.KeyNseRepoManifest
+	ValKeyScriptPrefix     = templates.KeyNseScriptPrefix
+	ValKeyScriptMetaPrefix = templates.KeyNseScriptMetaPrefix
 )
 
 // NSERepoURL returns the NSE repository URL from env or the default.
