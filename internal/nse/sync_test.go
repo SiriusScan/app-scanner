@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/SiriusScan/go-api/sirius/store"
+	"github.com/SiriusScan/go-api/sirius/store/templates"
 )
 
 func TestCanonicalScriptID(t *testing.T) {
@@ -33,9 +34,9 @@ func TestCanonicalScriptID(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := canonicalScriptID(tc.in)
+			got := templates.CanonicalScriptID(tc.in)
 			if got != tc.want {
-				t.Errorf("canonicalScriptID(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("templates.CanonicalScriptID(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
