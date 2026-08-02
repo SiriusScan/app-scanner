@@ -8,6 +8,7 @@ import (
 
 // ScanTask represents a single scanning task
 type ScanTask struct {
+	ScanID  string
 	IP      string
 	Options ScanOptions
 }
@@ -63,21 +64,29 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 				return
 			}
 
-			// Check if context is cancelled before processing
+			// Check if pool context is cancelled before processing
 			if ctx.Err() != nil {
 				slog.Debug("worker skipping task - context cancelled", "worker_id", id, "ip", task.IP)
 				continue
 			}
 
-			// Get the active scan context from the manager
-			// This allows individual scans to be cancelled
-			scanCtx := wp.manager.GetActiveScanContext()
-			if scanCtx == nil {
-				scanCtx = ctx // Fallback to worker context
+			// Prefer per-job context; fall back to pool context.
+			scanCtx := ctx
+			if task.ScanID != "" {
+				if job := wp.manager.GetJobContext(task.ScanID); job != nil {
+					if job.Ctx != nil {
+						scanCtx = job.Ctx
+					}
+				} else {
+					slog.Debug("worker skipping task - job not found",
+						"worker_id", id, "scan_id", task.ScanID, "ip", task.IP)
+					continue
+				}
+			} else if active := wp.manager.GetActiveScanContext(); active != nil {
+				scanCtx = active
 			}
 
-			// Process the task with scan context
-			wp.manager.scanIP(scanCtx, task.IP)
+			wp.manager.scanIP(scanCtx, task.ScanID, task.IP)
 
 		case <-ctx.Done():
 			slog.Info("worker context cancelled", "worker_id", id)

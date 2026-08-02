@@ -135,3 +135,49 @@ func TestScanUpdater_Update(t *testing.T) {
 		t.Errorf("Expected HostsCompleted to be 1, got %d", updatedScan.HostsCompleted)
 	}
 }
+
+// TestScanUpdater_UpdateScan verifies keyed scan:state:<id> roundtrip.
+func TestScanUpdater_UpdateScan(t *testing.T) {
+	fakeStore := &fakeKVStore{data: map[string]string{}}
+	updater := NewScanUpdater(fakeStore)
+	scanID := "job-123"
+
+	if err := updater.UpdateScan(context.Background(), scanID, func(scan *store.ScanResult) error {
+		scan.ID = scanID
+		scan.Status = "running"
+		scan.Hosts, _ = mergeHost(scan.Hosts, "10.0.0.1", "", "network")
+		scan.HostsCompleted = 1
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateScan failed: %v", err)
+	}
+
+	key := ScanStateKey(scanID)
+	resp, err := fakeStore.GetValue(context.Background(), key)
+	if err != nil {
+		t.Fatalf("GetValue(%s) failed: %v", key, err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(resp.Message.Value)
+	if err != nil {
+		t.Fatalf("Decoding failed: %v", err)
+	}
+
+	var updatedScan store.ScanResult
+	if err := json.Unmarshal(decoded, &updatedScan); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if updatedScan.ID != scanID {
+		t.Errorf("ID = %q, want %q", updatedScan.ID, scanID)
+	}
+	if updatedScan.Status != "running" {
+		t.Errorf("Status = %q, want running", updatedScan.Status)
+	}
+	if len(updatedScan.Hosts) != 1 || updatedScan.Hosts[0].IP != "10.0.0.1" {
+		t.Errorf("unexpected hosts: %v", updatedScan.Hosts)
+	}
+
+	// Legacy currentScan must remain untouched.
+	if _, err := fakeStore.GetValue(context.Background(), LegacyCurrentScanKey); err == nil {
+		t.Error("UpdateScan must not write legacy currentScan")
+	}
+}
