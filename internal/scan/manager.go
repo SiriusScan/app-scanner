@@ -97,8 +97,9 @@ type ScanManager struct {
 
 // SourcedHostRequest represents the request structure for source-aware API submissions
 type SourcedHostRequest struct {
-	Host   sirius.Host       `json:"host"`
-	Source models.ScanSource `json:"source"`
+	Host           sirius.Host       `json:"host"`
+	Source         models.ScanSource `json:"source"`
+	OwnerSubjectID string            `json:"owner_subject_id,omitempty"`
 }
 
 // NewScanManager creates a new ScanManager.
@@ -270,9 +271,15 @@ func (sm *ScanManager) createScanSource(toolName, scanID string, opts ScanOption
 func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName, scanID string, opts ScanOptions) error {
 	source := sm.createScanSource(toolName, scanID, opts)
 
+	ownerSubjectID := ""
+	if job := sm.GetJobContext(scanID); job != nil {
+		ownerSubjectID = job.OwnerSubjectID
+	}
+
 	request := SourcedHostRequest{
-		Host:   host,
-		Source: source,
+		Host:           host,
+		Source:         source,
+		OwnerSubjectID: ownerSubjectID,
 	}
 
 	jsonData, err := json.Marshal(request)
