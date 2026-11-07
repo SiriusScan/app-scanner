@@ -131,8 +131,13 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 	// Find the first args file that exists
 	var argsFilePath string
 	for _, path := range argsFilePaths {
-		if _, err := os.Stat(path); err == nil {
-			argsFilePath = path
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			// Nmap resolves relative script paths against its data directory,
+			// not necessarily the scanner's working directory.
+			argsFilePath, err = filepath.Abs(path)
+			if err != nil {
+				return "", fmt.Errorf("resolve script arguments path: %w", err)
+			}
 			break
 		}
 	}
@@ -196,17 +201,8 @@ func executeNmapWithConfig(config ScanConfig) (string, error) {
 
 		stderrStr := stderr.String()
 
-		// Check if the error is due to NSE script issues (non-fatal)
-		if strings.Contains(stderrStr, "did not match a category, filename, or directory") ||
-			strings.Contains(stderrStr, "NSE: failed to initialize the script engine") {
-			// Log the script error but don't fail the entire scan
-			slog.Warn("NSE script error (non-fatal), attempting fallback scan", "stderr", stderrStr)
-
-			// Retry with a minimal safe script set
-			return executeFallbackScan(config)
-		}
-
-		// For other errors, return the error
+		// A different script set is not equivalent to the requested profile.
+		// Surface execution errors rather than silently reporting a fallback as success.
 		return "", fmt.Errorf("error executing Nmap: %w\nStderr: %s", err, stderrStr)
 	}
 

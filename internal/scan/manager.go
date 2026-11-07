@@ -669,6 +669,9 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 		// Run vulnerability scan with specific ports
 		if err := sm.runVulnerabilityWithPorts(ctx, ip, portList); err != nil {
 			slog.Error("Vulnerability scan failed", "ip", ip, "error", err)
+			if ctx.Err() == nil {
+				sm.updateScanStatus("failed")
+			}
 		} else {
 			slog.Debug("Vulnerability scan completed", "ip", ip)
 		}
@@ -680,6 +683,11 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 // markHostComplete updates the scan status for a completed host
 func (sm *ScanManager) markHostComplete(ip string) error {
 	return sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+		// Workers finish asynchronously after cancellation or failure. Their
+		// cleanup must not turn a terminal/cancelling scan into a success.
+		if scan.Status == "cancelling" || scan.Status == "cancelled" || scan.Status == "failed" {
+			return nil
+		}
 		scan.HostsCompleted++
 		totalExpected := 0
 
@@ -931,6 +939,9 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 
 	// Update KV store with vulnerability details
 	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+		// Profiles may run Nmap without fingerprinting or enumeration. Record
+		// that discovered host too, even when there are no vulnerabilities.
+		scan.Hosts, _ = mergeHost(scan.Hosts, vulnResults.IP, vulnResults.Hostname, "network")
 		for _, vuln := range vulnResults.Vulnerabilities {
 			severity := calculateSeverity(vuln.RiskScore)
 			scan.Vulnerabilities = append(scan.Vulnerabilities, store.VulnerabilitySummary{
@@ -1159,7 +1170,7 @@ func (sm *ScanManager) ForceStopCurrentScan(scanID string) {
 func (sm *ScanManager) updateScanStatus(status string) {
 	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
 		scan.Status = status
-		if status == "cancelled" {
+		if status == "cancelled" || status == "failed" {
 			scan.EndTime = time.Now().Format(time.RFC3339)
 		}
 		return nil
