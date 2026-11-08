@@ -10,6 +10,7 @@ import (
 type ScanTask struct {
 	IP      string
 	Options ScanOptions
+	run     *ScanManager
 }
 
 // WorkerPool manages a pool of scanner workers
@@ -18,6 +19,9 @@ type WorkerPool struct {
 	tasks      chan ScanTask
 	manager    *ScanManager
 	wg         sync.WaitGroup
+	enqueueMu  sync.RWMutex
+	stopOnce   sync.Once
+	stopping   chan struct{}
 }
 
 // NewWorkerPool creates a new worker pool
@@ -26,6 +30,7 @@ func NewWorkerPool(numWorkers int, manager *ScanManager) *WorkerPool {
 		numWorkers: numWorkers,
 		tasks:      make(chan ScanTask, 1000), // Buffer size for pending tasks
 		manager:    manager,
+		stopping:   make(chan struct{}),
 	}
 }
 
@@ -40,13 +45,42 @@ func (wp *WorkerPool) Start(ctx context.Context) {
 
 // Stop gracefully shuts down the worker pool
 func (wp *WorkerPool) Stop() {
-	close(wp.tasks)
+	wp.stopOnce.Do(func() {
+		// Wake blocked producers before waiting for their channel-send locks.
+		close(wp.stopping)
+		wp.enqueueMu.Lock()
+		close(wp.tasks)
+		wp.enqueueMu.Unlock()
+	})
 	wp.wg.Wait()
 }
 
-// AddTask adds a new scanning task to the pool
+// AddTask accepts only tasks already bound to a scan run.
 func (wp *WorkerPool) AddTask(task ScanTask) {
-	wp.tasks <- task
+	if task.run != nil {
+		wp.addTask(task.run.ctx, task)
+	}
+}
+
+func (wp *WorkerPool) addTask(ctx context.Context, task ScanTask) bool {
+	wp.enqueueMu.RLock()
+	defer wp.enqueueMu.RUnlock()
+	select {
+	case <-wp.stopping:
+		return false
+	default:
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case wp.tasks <- task:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-wp.stopping:
+		return false
+	}
 }
 
 // worker processes tasks from the pool
@@ -69,15 +103,12 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 				continue
 			}
 
-			// Get the active scan context from the manager
-			// This allows individual scans to be cancelled
-			scanCtx := wp.manager.GetActiveScanContext()
-			if scanCtx == nil {
-				scanCtx = ctx // Fallback to worker context
+			// A queued task belongs to the run that created it, even after
+			// cancellation or replacement. Never borrow a newer scan context.
+			if task.run == nil || task.run.ctx.Err() != nil {
+				continue
 			}
-
-			// Process the task with scan context
-			wp.manager.scanIP(scanCtx, task.IP)
+			task.run.scanIP(task.run.ctx, task.IP)
 
 		case <-ctx.Done():
 			slog.Info("worker context cancelled", "worker_id", id)

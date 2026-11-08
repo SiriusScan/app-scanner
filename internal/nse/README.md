@@ -1,5 +1,8 @@
 # NSE (Nmap Script Engine) Package
 
+For the current cross-component ownership, deletion, atomic update, and isolated
+functional-test contract, see [NSE catalog consistency](../../documentation/nse-catalog-consistency.md).
+
 This package manages NSE scripts in the Sirius Scanner, providing a robust synchronization system between local scripts, a global ValKey store, and Git repositories. The system ensures consistent script management across Docker containers while maintaining script integrity and version control.
 
 ## Core Components

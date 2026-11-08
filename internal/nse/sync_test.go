@@ -3,7 +3,6 @@ package nse
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,13 +68,13 @@ func (m *mockKVStore) GetValue(_ context.Context, key string) (store.ValkeyRespo
 	defer m.mu.Unlock()
 	v, ok := m.values[key]
 	if !ok {
-		return store.ValkeyResponse{}, errors.New("valkey nil message: key '" + key + "' not found")
+		return store.ValkeyResponse{}, fmt.Errorf("key %q: %w", key, store.ErrKeyNotFound)
 	}
 	return store.ValkeyResponse{Message: store.ValkeyValue{Value: v}}, nil
 }
 
-func (m *mockKVStore) GetTTL(_ context.Context, _ string) (int, error)     { return -1, nil }
-func (m *mockKVStore) SetExpire(_ context.Context, _ string, _ int) error  { return nil }
+func (m *mockKVStore) GetTTL(_ context.Context, _ string) (int, error)    { return -1, nil }
+func (m *mockKVStore) SetExpire(_ context.Context, _ string, _ int) error { return nil }
 func (m *mockKVStore) DeleteValue(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -270,3 +269,28 @@ var _ store.KVStore = (*mockKVStore)(nil)
 
 // avoid unused-import warnings if the test is trimmed.
 var _ = fmt.Sprintf
+
+func (m *mockKVStore) CompareAndSwapValues(ctx context.Context, expected map[string]*string, updates map[string]*string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	for key, want := range expected {
+		actual, exists := m.values[key]
+		if want == nil && exists || want != nil && (!exists || *want != actual) {
+			return false, nil
+		}
+	}
+	for key, value := range updates {
+		if _, ok := expected[key]; !ok {
+			return false, fmt.Errorf("unguarded update")
+		}
+		if value == nil {
+			delete(m.values, key)
+		} else {
+			m.values[key] = *value
+		}
+	}
+	return true, nil
+}

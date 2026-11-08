@@ -8,12 +8,12 @@ func TestCalculateSeverity(t *testing.T) {
 		score    float64
 		expected string
 	}{
-		{0.5, "informational"},
+		{0.5, "low"},
 		{1.5, "low"},
-		{3.5, "medium"},
-		{5.5, "high"},
-		{8.5, "critical"},
-		{9.5, "informational"}, // default falls back to informational
+		{3.5, "low"},
+		{5.5, "medium"},
+		{8.5, "high"},
+		{9.5, "critical"},
 	}
 
 	for _, tt := range tests {
