@@ -84,18 +84,17 @@ func containsAny(slice []string, target string) bool {
 // Severity Calculation
 // ============================================================================
 
-// calculateSeverity maps a risk score to a severity string.
+// calculateSeverity maps a CVSS score to its standard severity band.
+// Zero and invalid scores retain the informational fallback.
 func calculateSeverity(score float64) string {
 	switch {
-	case score < 1.0:
-		return "informational"
-	case score < 3.0:
+	case score > 0 && score < 4.0:
 		return "low"
-	case score < 5.0:
+	case score >= 4.0 && score < 7.0:
 		return "medium"
-	case score < 7.0:
+	case score >= 7.0 && score < 9.0:
 		return "high"
-	case score < 9.0:
+	case score >= 9.0 && score <= 10.0:
 		return "critical"
 	default:
 		return "informational"
@@ -105,6 +104,9 @@ func calculateSeverity(score float64) string {
 // ============================================================================
 // Network/IP Helpers
 // ============================================================================
+
+const maxTargetHostBits = 16
+const maxTargetAddresses = 1 << maxTargetHostBits
 
 // expandCIDR takes a CIDR notation string and returns a list of IP addresses
 func expandCIDR(cidr string) ([]string, error) {
@@ -118,13 +120,11 @@ func expandCIDR(cidr string) ([]string, error) {
 	network := ipnet.IP.Mask(ipnet.Mask)
 	broadcast := getLastIP(network, ipnet.Mask)
 
-	// Calculate total addresses
+	// Check the host-bit count before shifting: large IPv6 networks can
+	// overflow an int and otherwise bypass the address limit entirely.
 	ones, bits := ipnet.Mask.Size()
-	numAddresses := 1 << uint(bits-ones)
-
-	// For very large networks, implement a safety check
-	if numAddresses > 65536 { // Limit to /16 networks
-		return nil, fmt.Errorf("CIDR range too large: %d addresses", numAddresses)
+	if bits-ones > maxTargetHostBits {
+		return nil, fmt.Errorf("CIDR range too large: exceeds %d addresses", maxTargetAddresses)
 	}
 
 	// Generate all IP addresses in the range
@@ -182,14 +182,22 @@ func expandIPRange(ipRange string) ([]string, error) {
 		return nil, fmt.Errorf("invalid IP address in range: %s", ipRange)
 	}
 
+	// This range format supports IPv4 only. Reject IPv6 and mixed-family
+	// ranges before the IPv4 conversion can silently treat an endpoint as zero.
+	startIP, endIP = startIP.To4(), endIP.To4()
+	if startIP == nil || endIP == nil {
+		return nil, fmt.Errorf("IP ranges require two IPv4 addresses")
+	}
+
 	// Ensure start IP is less than end IP
 	if !isIPLessThan(startIP, endIP) {
 		return nil, fmt.Errorf("start IP must be less than end IP")
 	}
 
-	// Calculate number of IPs in range
-	numIPs := ipToUint32(endIP) - ipToUint32(startIP) + 1
-	if numIPs > 65536 { // Limit to reasonable range
+	// Widen before subtracting and adding so the full IPv4 range does not
+	// wrap from 2^32 addresses to zero and bypass the limit.
+	numIPs := uint64(ipToUint32(endIP)) - uint64(ipToUint32(startIP)) + 1
+	if numIPs > maxTargetAddresses {
 		return nil, fmt.Errorf("IP range too large: %d addresses", numIPs)
 	}
 

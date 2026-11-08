@@ -12,14 +12,14 @@ import (
 func TestLateWorkerCompletionPreservesUnsuccessfulStatus(t *testing.T) {
 	for _, status := range []string{"cancelling", "cancelled", "failed"} {
 		t.Run(status, func(t *testing.T) {
-			initial := store.ScanResult{Status: status, EndTime: "2026-11-07T23:10:47Z"}
+			initial := store.ScanResult{ID: "scan-a", Status: status, EndTime: "2026-11-07T23:10:47Z"}
 			raw, err := json.Marshal(initial)
 			if err != nil {
 				t.Fatal(err)
 			}
 			encoded := base64.StdEncoding.EncodeToString(raw)
 			kv := &fakeKVStore{data: map[string]string{"currentScan": encoded}}
-			sm := &ScanManager{scanUpdater: NewScanUpdater(kv)}
+			sm := &ScanManager{currentScanID: "scan-a", scanUpdater: NewScanUpdater(kv)}
 			if err := sm.markHostComplete("192.0.2.1"); err != nil {
 				t.Fatal(err)
 			}

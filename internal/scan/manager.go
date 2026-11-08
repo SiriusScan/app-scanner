@@ -84,12 +84,12 @@ type ScanManager struct {
 	templateManager    *TemplateManager
 	scanStrategies     map[string]ScanStrategy
 	options            *ScanOptions
-	toolFactory        *ScanToolFactory
+	toolFactory        scanToolFactory
 	scanUpdater        *ScanUpdater
 	kvStore            store.KVStore
-	apiBaseURL         string         // API base URL for source-aware submissions
-	apiHTTPClient      *http.Client   // Shared HTTP client for API submissions
-	logger             *LoggingClient // Centralized logging client
+	apiBaseURL         string       // API base URL for source-aware submissions
+	apiHTTPClient      *http.Client // Shared HTTP client for API submissions
+	logger             scanLogger   // Centralized logging client
 
 	// Cancellation support
 	activeScanCtx    context.Context    // Context for the currently running scan
@@ -363,14 +363,23 @@ func (sm *ScanManager) handleMessage(msg string) {
 		return
 	}
 
-	// Create a scan-specific context for cancellation support
-	sm.scanMutex.Lock()
-	sm.isCancelling = false
-	sm.activeScanCtx, sm.activeScanCancel = context.WithCancel(sm.ctx)
-	sm.scanMutex.Unlock()
+	// Reject invalid/stale messages before replacing the active run. Every task
+	// then retains this run's identity, options and cancellation context.
+	if err := sm.validateScanMessage(&scanMsg); err != nil {
+		slog.Error("Invalid scan configuration", "error", err)
+		sm.failScan(scanMsg.ID)
+		return
+	}
+	run, err := sm.newScanRun(scanMsg.ID)
+	if err != nil {
+		slog.Warn("Ignoring scan request", "scan_id", scanMsg.ID, "error", err)
+		return
+	}
+	run.handleScanMessage(scanMsg)
+}
 
+func (sm *ScanManager) handleScanMessage(scanMsg ScanMessage) {
 	// Log scan initiation
-	sm.currentScanID = scanMsg.ID
 	sm.logger.LogScanEvent(scanMsg.ID, "scan_initiated", "Scan request received", map[string]interface{}{
 		"targets_count": len(scanMsg.Targets),
 		"priority":      scanMsg.Priority,
@@ -384,13 +393,7 @@ func (sm *ScanManager) handleMessage(msg string) {
 		if err != nil {
 			slog.Error("Failed to get template", "template_id", scanMsg.Options.TemplateID, "error", err)
 			sm.logger.LogScanError(scanMsg.ID, "template_resolution", "template_not_found", "Failed to resolve template", err)
-			if updateErr := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
-				scan.Status = "failed"
-				scan.EndTime = time.Now().Format(time.RFC3339)
-				return nil
-			}); updateErr != nil {
-				slog.Error("Failed to mark scan as failed", "error", updateErr)
-			}
+			sm.updateScanStatus("failed")
 			return
 		}
 
@@ -417,24 +420,25 @@ func (sm *ScanManager) handleMessage(msg string) {
 		slog.Info("Resolved template", "template_id", template.ID, "template_name", template.Name)
 	}
 
-	// Continue with validation and processing
-	if err := sm.validateScanMessage(&scanMsg); err != nil {
-		slog.Error("Invalid scan configuration", "error", err)
-		sm.logger.LogScanError(scanMsg.ID, "validation", "scan_validation_error", "Invalid scan configuration", err)
+	sm.currentScanOptions = cloneScanOptions(scanMsg.Options)
+	sm.toolFactory.SetOptions(sm.currentScanOptions)
+
+	// Expand and deduplicate every target before workers start. Incremental
+	// totals let the first fast host complete a scan before later targets exist.
+	targetIPs, err := sm.prepareScanTargets(scanMsg.Targets)
+	if err != nil {
+		slog.Error("Failed to prepare scan targets", "scan_id", sm.currentScanID, "error", err)
+		sm.updateScanStatus("failed")
 		return
 	}
-
-	sm.currentScanOptions = scanMsg.Options
-	sm.toolFactory.SetOptions(scanMsg.Options)
-
-	// Process all targets
-	for _, target := range scanMsg.Targets {
-		sm.processTarget(target)
-	}
+	sm.scheduleTargets(targetIPs)
 }
 
 // validateScanMessage performs validation on the scan message
 func (sm *ScanManager) validateScanMessage(msg *ScanMessage) error {
+	if strings.TrimSpace(msg.ID) == "" {
+		return fmt.Errorf("scan ID is required")
+	}
 	if len(msg.Targets) == 0 {
 		return fmt.Errorf("no targets specified")
 	}
@@ -446,78 +450,68 @@ func (sm *ScanManager) validateScanMessage(msg *ScanMessage) error {
 	return nil
 }
 
-// processTarget runs the discovery scan followed by a vulnerability scan
-func (sm *ScanManager) processTarget(target Target) {
-	slog.Debug("Processing target", "type", target.Type, "value", target.Value, "timeout", target.Timeout)
-
-	// Log target processing start
-	sm.logger.LogScanEvent(sm.currentScanID, "target_processing", "Target processing started", map[string]interface{}{
-		"target_value": target.Value,
-		"target_type":  target.Type,
-		"timeout":      target.Timeout,
-	})
-
-	// Convert target to appropriate format based on type
-	targetIPs, err := sm.prepareTarget(target)
-	if err != nil {
-		slog.Error("Failed to prepare target", "target_value", target.Value, "error", err)
-		sm.logger.LogScanError(sm.currentScanID, target.Value, "target_preparation_error", "Failed to prepare target", err)
-		return
-	}
-
-	// Log target preparation success
-	sm.logger.LogScanEvent(sm.currentScanID, "target_prepared", "Target prepared successfully", map[string]interface{}{
-		"target_value":  target.Value,
-		"target_type":   target.Type,
-		"ips_generated": len(targetIPs),
-		"ips":           targetIPs,
-	})
-
-	// Add each IP as a task to the worker pool
-	slog.Debug("Adding IPs to worker pool", "count", len(targetIPs), "scan_types", sm.currentScanOptions.ScanTypes, "port_range", sm.currentScanOptions.PortRange)
-
-	// Track expected work so scans can complete even when no hosts are ultimately discovered.
-	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
-		if netScan, ok := scan.SubScans["network"]; ok {
-			netScan.Progress.Total += len(targetIPs)
-			scan.SubScans["network"] = netScan
+// prepareScanTargets validates the complete request before any work is queued.
+func (sm *ScanManager) prepareScanTargets(targets []Target) ([]string, error) {
+	seen := make(map[string]bool)
+	var ips []string
+	for _, target := range targets {
+		if err := sm.ctx.Err(); err != nil {
+			return nil, err
 		}
+		expanded, err := sm.prepareTarget(target)
+		if err != nil {
+			return nil, fmt.Errorf("target %q: %w", target.Value, err)
+		}
+		for _, ip := range expanded {
+			if !seen[ip] {
+				seen[ip] = true
+				ips = append(ips, ip)
+			}
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no target IPs resolved")
+	}
+	return ips, nil
+}
+
+func (sm *ScanManager) scheduleTargets(targetIPs []string) {
+	if err := sm.scanUpdater.UpdateForScan(sm.ctx, sm.currentScanID, func(scan *store.ScanResult) error {
+		if scanIsTerminal(scan.Status) || scan.Status == "cancelling" {
+			return fmt.Errorf("scan is not active")
+		}
+		if scan.SubScans == nil {
+			scan.SubScans = make(map[string]store.SubScan)
+		}
+		netScan := scan.SubScans["network"]
+		netScan.Type, netScan.Enabled, netScan.Status = "network", true, "running"
+		netScan.Progress.Total, netScan.Progress.Completed = len(targetIPs), 0
+		scan.SubScans["network"] = netScan
+		scan.HostsCompleted = 0
 		if scan.StartTime == "" {
 			scan.StartTime = time.Now().Format(time.RFC3339)
 		}
 		return nil
 	}); err != nil {
-		slog.Warn("Failed to update expected network target count",
-			"target", target.Value,
-			"count", len(targetIPs),
-			"error", err)
+		slog.Warn("Cannot schedule scan", "scan_id", sm.currentScanID, "error", err)
+		return
 	}
-
-	// Log scan started event (new event system)
 	sm.logger.LogScanStarted(sm.currentScanID, targetIPs, map[string]interface{}{
-		"scan_types":   sm.currentScanOptions.ScanTypes,
-		"port_range":   sm.currentScanOptions.PortRange,
-		"target_value": target.Value,
-		"target_type":  target.Type,
+		"scan_types": sm.currentScanOptions.ScanTypes,
+		"port_range": sm.currentScanOptions.PortRange,
 	})
-
 	for _, ip := range targetIPs {
-		task := ScanTask{
-			IP:      ip,
-			Options: sm.currentScanOptions,
+		if !sm.workerPool.addTask(sm.ctx, ScanTask{IP: ip, Options: sm.currentScanOptions, run: sm}) {
+			return
 		}
-		sm.workerPool.AddTask(task)
 	}
 }
 
 // scanIP performs the actual scanning of a single IP using a sequential pipeline
 func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 	defer func() {
-		// NOTE: cancellation short-circuit intentionally disabled. Preserved
-		// from a long-standing inline-sed patch in sirius-engine/Dockerfile;
-		// removing it requires understanding why markHostComplete must run
-		// even after the context is cancelled. See SHA-AUDIT-2026-04.md.
-		if false && ctx.Err() != nil {
+		// Cancelled/replaced runs must not contribute progress or success.
+		if ctx.Err() != nil {
 			return
 		}
 		if err := sm.markHostComplete(ip); err != nil {
@@ -546,11 +540,14 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 		slog.Debug("Phase 0: Fingerprinting scan", "ip", ip)
 		startTime := time.Now()
 		fingerprintStrategy := sm.toolFactory.CreateFingerprintTool()
-		result, err := fingerprintStrategy.Fingerprint(ip)
+		result, err := fingerprintStrategy.FingerprintWithContext(ctx, ip)
 		duration := time.Since(startTime)
 
 		if err != nil {
 			slog.Error("Fingerprinting failed", "ip", ip, "error", err)
+			if ctx.Err() == nil {
+				sm.updateScanStatus("failed")
+			}
 			sm.logger.LogToolExecution(sm.currentScanID, ip, "ping++", duration, false, map[string]interface{}{
 				"error": err.Error(),
 			})
@@ -584,7 +581,11 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 
 			// Update KV store with discovered host
 			hostWasNew := false
-			if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+			if err := sm.scanUpdater.UpdateForScan(context.Background(), sm.currentScanID, func(scan *store.ScanResult) error {
+				hostWasNew = false
+				if scanIsTerminal(scan.Status) || scan.Status == "cancelling" {
+					return nil
+				}
 				var isNew bool
 				scan.Hosts, isNew = mergeHost(scan.Hosts, ip, "", "network")
 				if isNew {
@@ -595,6 +596,7 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 				}
 				return nil
 			}); err != nil {
+				hostWasNew = false
 				slog.Warn("Failed to update KV store with fingerprint discovery",
 					"scan_id", sm.currentScanID,
 					"ip", ip,
@@ -602,7 +604,7 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 			}
 
 			// Log host discovered event
-			if hostWasNew {
+			if hostWasNew && sm.ctx.Err() == nil {
 				sm.logger.LogHostDiscovered(ip, sm.currentScanID, map[string]interface{}{
 					"os_family":  result.OSFamily,
 					"ttl":        result.TTL,
@@ -631,6 +633,9 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 		ports, err := sm.runEnumeration(ctx, ip)
 		if err != nil {
 			slog.Error("Enumeration failed", "ip", ip, "error", err)
+			if ctx.Err() == nil {
+				sm.updateScanStatus("failed")
+			}
 		} else if len(ports) > 0 {
 			discoveredPorts = ports
 			slog.Debug("Enumeration found ports", "ip", ip, "count", len(ports), "ports", ports)
@@ -680,81 +685,46 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 	slog.Debug("Scan pipeline completed", "ip", ip)
 }
 
-// markHostComplete updates the scan status for a completed host
+// markHostComplete accounts for one scheduled network target.
 func (sm *ScanManager) markHostComplete(ip string) error {
-	return sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
-		// Workers finish asynchronously after cancellation or failure. Their
-		// cleanup must not turn a terminal/cancelling scan into a success.
-		if scan.Status == "cancelling" || scan.Status == "cancelled" || scan.Status == "failed" {
+	var updated *store.ScanResult
+	err := sm.scanUpdater.UpdateForScan(context.Background(), sm.currentScanID, func(scan *store.ScanResult) error {
+		updated = nil
+		if scanIsTerminal(scan.Status) || scan.Status == "cancelling" {
+			return nil
+		}
+		netScan, ok := scan.SubScans["network"]
+		if !ok || scanIsTerminal(netScan.Status) || netScan.Progress.Total <= 0 {
+			return nil
+		}
+		if scan.HostsCompleted >= netScan.Progress.Total {
 			return nil
 		}
 		scan.HostsCompleted++
-		totalExpected := 0
-
-		// Update network sub-scan progress
-		if netScan, ok := scan.SubScans["network"]; ok {
-			netScan.Progress.Completed = scan.HostsCompleted
-			totalExpected = netScan.Progress.Total
-			scan.SubScans["network"] = netScan
+		netScan.Progress.Completed = scan.HostsCompleted
+		if scan.HostsCompleted == netScan.Progress.Total {
+			netScan.Status = "completed"
 		}
-
-		// Log host completion
-		sm.logger.LogScanEvent(sm.currentScanID, "host_completed", "Host scan completed", map[string]interface{}{
-			"host_ip":         ip,
-			"hosts_completed": scan.HostsCompleted,
-			"total_hosts":     len(scan.Hosts),
-		})
-
-		// Count network-sourced hosts for completion check
-		networkHostCount := 0
-		for _, h := range scan.Hosts {
-			for _, src := range h.Sources {
-				if src == "network" {
-					networkHostCount++
-					break
-				}
-			}
-		}
-
-		if totalExpected == 0 {
-			totalExpected = networkHostCount
-		}
-		if totalExpected < scan.HostsCompleted {
-			totalExpected = scan.HostsCompleted
-		}
-
-		// If all scheduled network targets are processed, mark network sub-scan as complete.
-		if scan.HostsCompleted >= totalExpected && totalExpected > 0 {
-			if netScan, ok := scan.SubScans["network"]; ok {
-				netScan.Status = "completed"
-				netScan.Progress.Total = totalExpected
-				netScan.Progress.Completed = totalExpected
-				scan.SubScans["network"] = netScan
-			}
-
-			// Log scan completion (new event system)
-			sm.logger.LogScanCompleted(sm.currentScanID, map[string]interface{}{
-				"hosts_discovered":      len(scan.Hosts),
-				"hosts_completed":       scan.HostsCompleted,
-				"vulnerabilities_found": len(scan.Vulnerabilities),
-				"total_hosts":           len(scan.Hosts),
-			})
-
-			// Only mark overall scan as completed if ALL sub-scans are done
-			allDone := true
-			for _, ss := range scan.SubScans {
-				if ss.Enabled && ss.Status != "completed" && ss.Status != "failed" {
-					allDone = false
-					break
-				}
-			}
-			if allDone {
-				scan.Status = "completed"
-				scan.EndTime = time.Now().Format(time.RFC3339)
-			}
-		}
+		scan.SubScans["network"] = netScan
+		finishScanIfDone(scan)
+		updated = scan
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if updated != nil {
+		sm.logger.LogScanEvent(sm.currentScanID, "host_completed", "Host scan completed", map[string]interface{}{
+			"host_ip": ip, "hosts_completed": updated.HostsCompleted, "total_hosts": len(updated.Hosts),
+		})
+		if updated.Status == "completed" {
+			sm.logger.LogScanCompleted(sm.currentScanID, map[string]interface{}{
+				"hosts_discovered": len(updated.Hosts), "hosts_completed": updated.HostsCompleted,
+				"vulnerabilities_found": len(updated.Vulnerabilities), "total_hosts": len(updated.Hosts),
+			})
+		}
+	}
+	return nil
 }
 
 // runEnumeration performs the enumeration scan
@@ -805,7 +775,11 @@ func (sm *ScanManager) runEnumeration(ctx context.Context, ip string) ([]int, er
 	// Guard: only add host if enumResults.IP is non-empty (naabu returns empty Host{} when host is down)
 	hostWasNew := false
 	if enumResults.IP != "" {
-		if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+		if err := sm.scanUpdater.UpdateForScan(context.Background(), sm.currentScanID, func(scan *store.ScanResult) error {
+			hostWasNew = false
+			if scanIsTerminal(scan.Status) || scan.Status == "cancelling" {
+				return nil
+			}
 			var isNew bool
 			scan.Hosts, isNew = mergeHost(scan.Hosts, enumResults.IP, "", "network")
 			if isNew {
@@ -854,18 +828,9 @@ func (sm *ScanManager) runVulnerability(ctx context.Context, ip string) error {
 func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string, portList string) error {
 	startTime := time.Now()
 
-	// Override port range if specified (for discovered ports pipeline)
-	originalPortRange := sm.currentScanOptions.PortRange
-	if portList != "" {
-		sm.currentScanOptions.PortRange = portList
-		slog.Debug("Overriding port range", "ip", ip, "original", originalPortRange, "port_list", portList)
-	}
-	// Restore original port range when done
-	defer func() {
-		if portList != "" {
-			sm.currentScanOptions.PortRange = originalPortRange
-		}
-	}()
+	// Port overrides are host-local. Mutating the shared options races with
+	// other workers and can attribute one host's port list to another host.
+	sm = sm.forHostPorts(portList)
 
 	// Get script list from template if template ID is provided
 	var scriptList []string
@@ -938,7 +903,10 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 	}
 
 	// Update KV store with vulnerability details
-	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+	if err := sm.scanUpdater.UpdateForScan(context.Background(), sm.currentScanID, func(scan *store.ScanResult) error {
+		if scanIsTerminal(scan.Status) || scan.Status == "cancelling" {
+			return nil
+		}
 		// Profiles may run Nmap without fingerprinting or enumeration. Record
 		// that discovered host too, even when there are no vulnerabilities.
 		scan.Hosts, _ = mergeHost(scan.Hosts, vulnResults.IP, vulnResults.Hostname, "network")
@@ -1051,7 +1019,7 @@ func (m *ScanManager) SetScanOptions(options *ScanOptions) {
 // ControlMessage represents a control command for the scanner
 type ControlMessage struct {
 	Action    string `json:"action"`    // Action to perform (e.g., "cancel")
-	ScanID    string `json:"scan_id"`   // Optional: specific scan to cancel
+	ScanID    string `json:"scan_id"`   // Required: exact scan to cancel
 	Timestamp string `json:"timestamp"` // When the command was issued
 }
 
@@ -1083,153 +1051,111 @@ func (sm *ScanManager) handleControlMessage(msg string) {
 	}
 }
 
-// CancelCurrentScan cancels the currently running scan.
-// If scanID is provided, it only cancels if it matches the current scan.
-func (sm *ScanManager) CancelCurrentScan(scanID string) {
+// CancelCurrentScan cancels only the explicitly identified scan. Untargeted
+// commands are rejected because delayed queue delivery could hit a later scan.
+func (sm *ScanManager) CancelCurrentScan(scanID string) { sm.cancelScan(scanID, false) }
+
+func (sm *ScanManager) ForceStopCurrentScan(scanID string) { sm.cancelScan(scanID, true) }
+
+func (sm *ScanManager) cancelScan(scanID string, force bool) {
 	sm.scanMutex.Lock()
 	defer sm.scanMutex.Unlock()
-
-	// If a specific scan ID is provided, verify it matches
-	if scanID != "" && sm.currentScanID != "" && scanID != sm.currentScanID {
-		slog.Warn("Cancel request for scan does not match current scan, ignoring", "requested_scan_id", scanID, "current_scan_id", sm.currentScanID)
+	if scanID == "" {
+		slog.Warn("Ignoring untargeted cancellation")
 		return
 	}
-
-	if sm.activeScanCancel == nil {
-		slog.Warn("No active scan in memory to cancel")
-		// Still update ValKey to clear any stale scan data that might be stuck
-		sm.clearStaleScanData(scanID)
+	sameLocalRun := sm.currentScanID == scanID
+	if sameLocalRun && sm.activeScanCancel != nil {
+		// An exact local match may always stop its own work, even if storage
+		// has since advanced or is unavailable. Never stop a different run yet.
+		sm.isCancelling = true
+		sm.activeScanCancel()
+	}
+	// The persisted ID is authoritative. Agent-only scans and requests queued
+	// before dequeue have no matching local network run. CAS validates the ID
+	// and preserves a replacement if it changes while cancellation is written.
+	changed, err := sm.setScanStatus(scanID, "cancelled")
+	if err != nil {
 		return
 	}
-
-	if sm.isCancelling {
-		slog.Warn("Scan is already being cancelled")
-		return
+	if !sameLocalRun {
+		// A verified newer authoritative scan supersedes any leftover local
+		// network work. It is safe to stop that obsolete context, not to reuse it.
+		if sm.activeScanCancel != nil {
+			sm.activeScanCancel()
+		}
+		sm.currentScanID = scanID
+		sm.activeScanCtx, sm.activeScanCancel = nil, nil
 	}
-
-	slog.Debug("Cancelling scan", "scan_id", sm.currentScanID)
 	sm.isCancelling = true
-
-	// Cancel the scan context - this will propagate to all workers and external commands
-	sm.activeScanCancel()
-
-	// Update scan status in ValKey
-	sm.updateScanStatus("cancelled")
-
-	// Log the cancellation event
-	sm.logger.LogScanEvent(sm.currentScanID, "scan_cancelled", "Scan was cancelled by user", map[string]interface{}{
-		"scan_id":   sm.currentScanID,
-		"timestamp": time.Now().Format(time.RFC3339),
-	})
-
-	slog.Debug("Scan has been cancelled", "scan_id", sm.currentScanID)
-}
-
-// ForceStopCurrentScan forcefully stops the currently running scan.
-// Unlike CancelCurrentScan, this bypasses the isCancelling guard and resets
-// the cancellation state, allowing it to work even if a previous graceful
-// cancel is stuck. This is the Tier 2 escalation.
-func (sm *ScanManager) ForceStopCurrentScan(scanID string) {
-	sm.scanMutex.Lock()
-	defer sm.scanMutex.Unlock()
-
-	slog.Debug("Force stop requested for scan", "scan_id", scanID)
-
-	// If a specific scan ID is provided, verify it matches (but less strict than graceful)
-	if scanID != "" && sm.currentScanID != "" && scanID != sm.currentScanID {
-		slog.Warn("Force stop for scan does not match current scan, proceeding anyway", "requested_scan_id", scanID, "current_scan_id", sm.currentScanID)
-	}
-
-	if sm.activeScanCancel == nil {
-		slog.Warn("No active scan context to force stop, clearing stale data")
-		sm.isCancelling = false // Reset the flag regardless
-		sm.clearStaleScanData(scanID)
+	// Repeated cancellation retries failed writes but never reports a new
+	// cancellation for a terminal scan whose persisted outcome did not change.
+	if !changed {
 		return
 	}
-
-	// Cancel the context regardless of isCancelling state
-	slog.Debug("Force cancelling scan context")
-	sm.activeScanCancel()
-
-	// Update scan status in ValKey
-	sm.updateScanStatus("cancelled")
-
-	// Reset the cancelling flag so the scanner can accept new scans
-	sm.isCancelling = false
-
-	// Log the force stop event
-	sm.logger.LogScanEvent(sm.currentScanID, "scan_force_stopped", "Scan was force stopped by user", map[string]interface{}{
-		"scan_id":   sm.currentScanID,
-		"timestamp": time.Now().Format(time.RFC3339),
-	})
-
-	slog.Debug("Force stop completed for scan", "scan_id", sm.currentScanID)
+	event := "scan_cancelled"
+	if force {
+		event = "scan_force_stopped"
+	}
+	sm.logger.LogScanEvent(scanID, event, "Scan was cancelled by user", map[string]interface{}{"scan_id": scanID})
 }
 
-// updateScanStatus updates the scan status in ValKey
 func (sm *ScanManager) updateScanStatus(status string) {
-	if err := sm.scanUpdater.Update(context.Background(), func(scan *store.ScanResult) error {
+	sm.setScanStatus(sm.currentScanID, status)
+	if status == "failed" && sm.cancel != nil {
+		sm.cancel()
+	}
+}
+
+func (sm *ScanManager) failScan(scanID string) { sm.setScanStatus(scanID, "failed") }
+
+func (sm *ScanManager) setScanStatus(scanID, status string) (bool, error) {
+	changed := false
+	err := sm.scanUpdater.UpdateForScan(context.Background(), scanID, func(scan *store.ScanResult) error {
+		changed = false
+		if scanIsTerminal(scan.Status) {
+			return nil
+		}
+		if scan.Status == "cancelling" && status != "cancelled" {
+			return nil
+		}
+		if status == "failed" {
+			// A network failure stops this run, not the other enabled scanners.
+			// Keep accepting their results until every sub-scan is terminal.
+			if scan.SubScans == nil {
+				scan.SubScans = make(map[string]store.SubScan)
+			}
+			netScan, exists := scan.SubScans["network"]
+			if exists && scanIsTerminal(netScan.Status) {
+				return nil
+			}
+			changed = true
+			netScan.Type, netScan.Enabled, netScan.Status = "network", true, "failed"
+			scan.SubScans["network"] = netScan
+			scan.Status = "running"
+			finishScanIfDone(scan)
+			return nil
+		}
+		changed = scan.Status != status
 		scan.Status = status
-		if status == "cancelled" || status == "failed" {
+		if status == "cancelled" {
 			scan.EndTime = time.Now().Format(time.RFC3339)
+			if netScan, ok := scan.SubScans["network"]; ok && !scanIsTerminal(netScan.Status) {
+				netScan.Status = status
+				scan.SubScans["network"] = netScan
+			}
 		}
 		return nil
-	}); err != nil {
-		slog.Warn("Failed to update scan status", "status", status, "error", err)
+	})
+	if err != nil {
+		slog.Warn("Failed to update scan status", "scan_id", scanID, "status", status, "error", err)
 	}
+	return changed && err == nil, err
 }
 
-// clearStaleScanData marks any stale scan in ValKey as cancelled
-// This handles the case where the engine was restarted but ValKey still has old scan data
-func (sm *ScanManager) clearStaleScanData(scanID string) {
-	ctx := context.Background()
-
-	kvStore, err := store.NewValkeyStore()
-	if err != nil {
-		slog.Warn("Failed to connect to ValKey to clear stale data", "error", err)
-		return
-	}
-	defer kvStore.Close()
-
-	// Get current scan data from ValKey
-	resp, err := kvStore.GetValue(ctx, "currentScan")
-	if err != nil {
-		// No scan data to clear
-		slog.Debug("No stale scan data found in ValKey")
-		return
-	}
-
-	// Decode the base64 value (UI stores it as base64)
-	decodedBytes, err := decodeBase64(resp.Message.Value)
-	if err != nil {
-		// If decode fails, just delete the key
-		slog.Warn("Stale data is not valid base64, deleting key")
-		kvStore.DeleteValue(ctx, "currentScan")
-		return
-	}
-
-	// Parse the scan result
-	var scanResult map[string]interface{}
-	if err := json.Unmarshal(decodedBytes, &scanResult); err != nil {
-		slog.Warn("Stale data is not valid JSON, deleting key")
-		kvStore.DeleteValue(ctx, "currentScan")
-		return
-	}
-
-	// Update status to cancelled
-	scanResult["status"] = "cancelled"
-	scanResult["end_time"] = time.Now().Format(time.RFC3339)
-
-	updatedJSON, _ := json.Marshal(scanResult)
-	encodedValue := encodeBase64(updatedJSON)
-
-	if err := kvStore.SetValue(ctx, "currentScan", encodedValue); err != nil {
-		slog.Warn("Failed to update stale scan status", "error", err)
-		return
-	}
-
-	slog.Debug("Cleared stale scan data from ValKey (marked as cancelled)")
-}
+// Stale recovery uses the same injected store and identity check as active work.
+// Corrupt state is left intact for diagnosis rather than deleting an unknown scan.
+func (sm *ScanManager) clearStaleScanData(scanID string) { sm.setScanStatus(scanID, "cancelled") }
 
 // decodeBase64 decodes a base64 string
 func decodeBase64(s string) ([]byte, error) {

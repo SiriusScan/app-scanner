@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/SiriusScan/app-scanner/modules/naabu"
 	"github.com/SiriusScan/app-scanner/modules/nmap"
@@ -36,11 +37,15 @@ func (n *NmapStrategy) Execute(target string) (sirius.Host, error) {
 
 // ExecuteWithContext performs the vulnerability scan with cancellation support.
 func (n *NmapStrategy) ExecuteWithContext(ctx context.Context, target string) (sirius.Host, error) {
+	return n.executeWithContext(ctx, target, nmap.ScanWithConfig)
+}
+
+func (n *NmapStrategy) executeWithContext(ctx context.Context, target string, scan func(nmap.ScanConfig) (sirius.Host, error)) (sirius.Host, error) {
 	slog.Info("starting vulnerability scan", "target", target)
 
 	// Check for cancellation before starting
 	if ctx.Err() != nil {
-		return sirius.Host{}, fmt.Errorf("scan cancelled before starting")
+		return sirius.Host{}, fmt.Errorf("scan cancelled before starting: %w", ctx.Err())
 	}
 
 	// Create a scan config with context
@@ -68,30 +73,52 @@ func (n *NmapStrategy) ExecuteWithContext(ctx context.Context, target string) (s
 		slog.Debug("using template port range", "port_range", n.PortRange)
 	}
 
-	results, err := nmap.ScanWithConfig(config)
+	results, err := scan(config)
 	if err != nil {
 		return sirius.Host{}, err
 	}
 
 	// Check for cancellation after scan
 	if ctx.Err() != nil {
-		return sirius.Host{}, fmt.Errorf("scan cancelled")
+		return results, fmt.Errorf("scan cancelled: %w", ctx.Err())
 	}
 
-	// Expand vulnerability details using NVD.
-	expandedVulns := make([]sirius.Vulnerability, 0)
-	for _, vuln := range results.Vulnerabilities {
-		expanded := expandVulnerability(vuln)
-		expandedVulns = append(expandedVulns, expanded)
+	// NVD is optional metadata: bound the entire enrichment phase, not just
+	// each CVE, and retain findings if its budget runs out.
+	results.Vulnerabilities, err = enrichVulnerabilities(ctx, results.Vulnerabilities, nvdEnrichmentTimeout)
+	if err != nil {
+		return results, fmt.Errorf("scan cancelled during enrichment: %w", err)
 	}
-	results.Vulnerabilities = expandedVulns
 
 	slog.Info("vulnerability scan complete", "target", target, "vuln_count", len(results.Vulnerabilities))
 	return results, nil
 }
 
+const nvdEnrichmentTimeout = 30 * time.Second
+
+func enrichVulnerabilities(ctx context.Context, vulns []sirius.Vulnerability, timeout time.Duration) ([]sirius.Vulnerability, error) {
+	enrichmentCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	expanded := append([]sirius.Vulnerability{}, vulns...)
+	for i, vuln := range vulns {
+		if err := ctx.Err(); err != nil {
+			return expanded, err
+		}
+		if enrichmentCtx.Err() != nil {
+			slog.Warn("NVD enrichment budget exhausted", "remaining", len(vulns)-i)
+			break
+		}
+		expanded[i] = expandVulnerabilityWithContext(enrichmentCtx, vuln)
+	}
+	return expanded, ctx.Err()
+}
+
 // expandVulnerability supplements vulnerability details with NVD info.
 func expandVulnerability(vuln sirius.Vulnerability) sirius.Vulnerability {
+	return expandVulnerabilityWithContext(context.Background(), vuln)
+}
+
+func expandVulnerabilityWithContext(ctx context.Context, vuln sirius.Vulnerability) sirius.Vulnerability {
 	trimmed := strings.TrimSpace(vuln.VID)
 	if !strings.HasPrefix(trimmed, "CVE-") {
 		// Ensure the ID is properly formatted
@@ -107,13 +134,15 @@ func expandVulnerability(vuln sirius.Vulnerability) sirius.Vulnerability {
 	}
 
 	// Try to get details from NVD API
-	cveDetails, err := nvd.GetCVE(trimmed)
+	cveDetails, err := nvd.GetCVEContext(ctx, trimmed)
 	if err != nil {
 		// Log error but continue with basic vuln info
 		slog.Error("failed to get CVE details", "cve", trimmed, "error", err)
 
 		// Set minimal details for the vulnerability
-		vuln.Description = fmt.Sprintf("No description available for %s. Detected during scan.", trimmed)
+		if vuln.Description == "" {
+			vuln.Description = fmt.Sprintf("No description available for %s. Detected during scan.", trimmed)
+		}
 
 		// Set a default risk score if none is available
 		if vuln.RiskScore <= 0 {
@@ -151,8 +180,8 @@ func expandVulnerability(vuln sirius.Vulnerability) sirius.Vulnerability {
 		vuln.RiskScore = cveDetails.Metrics.CvssMetricV30[0].CvssData.BaseScore
 	} else if len(cveDetails.Metrics.CvssMetricV2) > 0 {
 		vuln.RiskScore = cveDetails.Metrics.CvssMetricV2[0].CvssData.BaseScore
-	} else {
-		// Default risk score if none available
+	} else if vuln.RiskScore <= 0 {
+		// Keep a scanner-provided score when NVD has no metrics.
 		vuln.RiskScore = 5.0 // Medium risk as default
 	}
 

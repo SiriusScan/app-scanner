@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/SiriusScan/go-api/sirius/store"
@@ -13,10 +14,13 @@ import (
 // fakeKVStore is a fake implementation of the KVStore interface for testing.
 type fakeKVStore struct {
 	data map[string]string
+	mu   sync.Mutex
 }
 
 // GetValue returns the value associated with the key.
 func (f *fakeKVStore) GetValue(ctx context.Context, key string) (store.ValkeyResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	val, ok := f.data[key]
 	if !ok {
 		return store.ValkeyResponse{}, errors.New("key not found")
@@ -28,18 +32,24 @@ func (f *fakeKVStore) GetValue(ctx context.Context, key string) (store.ValkeyRes
 
 // SetValue sets the key to the specified value.
 func (f *fakeKVStore) SetValue(ctx context.Context, key string, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.data[key] = value
 	return nil
 }
 
 // DeleteValue removes the key from the store.
 func (f *fakeKVStore) DeleteValue(ctx context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	delete(f.data, key)
 	return nil
 }
 
 // GetTTL returns the TTL for a key (stub implementation).
 func (f *fakeKVStore) GetTTL(ctx context.Context, key string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if _, ok := f.data[key]; ok {
 		return -1, nil // -1 means no expiration
 	}
@@ -48,6 +58,8 @@ func (f *fakeKVStore) GetTTL(ctx context.Context, key string) (int, error) {
 
 // ListKeys returns all keys matching the pattern (stub implementation).
 func (f *fakeKVStore) ListKeys(ctx context.Context, pattern string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	keys := make([]string, 0, len(f.data))
 	for k := range f.data {
 		keys = append(keys, k)
@@ -57,6 +69,8 @@ func (f *fakeKVStore) ListKeys(ctx context.Context, pattern string) ([]string, e
 
 // SetExpire sets an expiration time on a key (stub implementation).
 func (f *fakeKVStore) SetExpire(ctx context.Context, key string, ttl int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	// In a real implementation, this would set TTL. For testing, we just verify the key exists.
 	if _, ok := f.data[key]; !ok {
 		return errors.New("key not found")
@@ -66,6 +80,8 @@ func (f *fakeKVStore) SetExpire(ctx context.Context, key string, ttl int) error 
 
 // SetValueWithTTL sets a key with an expiration time (stub implementation).
 func (f *fakeKVStore) SetValueWithTTL(ctx context.Context, key string, value string, ttl int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.data[key] = value
 	// In a real implementation, this would also set TTL. For testing, we just store the value.
 	return nil
@@ -134,4 +150,15 @@ func TestScanUpdater_Update(t *testing.T) {
 	if updatedScan.HostsCompleted != 1 {
 		t.Errorf("Expected HostsCompleted to be 1, got %d", updatedScan.HostsCompleted)
 	}
+}
+
+func (f *fakeKVStore) CompareAndSetValue(ctx context.Context, key, expected, value string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	current, exists := f.data[key]
+	if !exists || current != expected {
+		return false, nil
+	}
+	f.data[key] = value
+	return true, nil
 }

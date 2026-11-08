@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,4 +237,28 @@ func TestNSESyncAndUpdate(t *testing.T) {
 			t.Fatalf("unexpected local script content: got %q want %q", string(localContent), updated.Content)
 		}
 	})
+}
+
+func (m *inMemoryKVStore) CompareAndSwapValues(ctx context.Context, expected map[string]*string, updates map[string]*string) (bool, error) {
+
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	for key, want := range expected {
+		actual, exists := m.data[key]
+		if want == nil && exists || want != nil && (!exists || *want != actual) {
+			return false, nil
+		}
+	}
+	for key, value := range updates {
+		if _, ok := expected[key]; !ok {
+			return false, fmt.Errorf("unguarded update")
+		}
+		if value == nil {
+			delete(m.data, key)
+		} else {
+			m.data[key] = *value
+		}
+	}
+	return true, nil
 }

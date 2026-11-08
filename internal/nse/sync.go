@@ -6,10 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/SiriusScan/go-api/sirius/store"
 	"github.com/SiriusScan/go-api/sirius/store/templates"
@@ -40,7 +37,7 @@ func (sm *SyncManager) loadRepositories(ctx context.Context) (*RepositoryList, e
 	resp, err := sm.kvStore.GetValue(ctx, ValKeyRepoManifestKey)
 	if err != nil {
 		// Check for key not found errors (valkey nil message or "not found")
-		if strings.Contains(err.Error(), "valkey nil message") || strings.Contains(err.Error(), "not found") {
+		if missingCatalogKey(err) {
 			// Load built-in repository list
 			slog.Info("no repository manifest found in ValKey, loading built-in manifest")
 			builtInList, err := sm.loadBuiltInRepositoryList()
@@ -54,8 +51,19 @@ func (sm *SyncManager) loadRepositories(ctx context.Context) (*RepositoryList, e
 				return nil, fmt.Errorf("failed to marshal repository list: %w", err)
 			}
 
-			if err := sm.kvStore.SetValue(ctx, ValKeyRepoManifestKey, string(manifestJSON)); err != nil {
+			updater, err := atomicUpdater(sm.kvStore)
+			if err != nil {
+				return nil, err
+			}
+			value := string(manifestJSON)
+			created, err := updater.CompareAndSwapValues(ctx,
+				map[string]*string{ValKeyRepoManifestKey: nil},
+				map[string]*string{ValKeyRepoManifestKey: &value})
+			if err != nil {
 				return nil, fmt.Errorf("failed to initialize ValKey repository manifest: %w", err)
+			}
+			if !created {
+				return sm.loadRepositories(ctx)
 			}
 
 			slog.Info("successfully initialized ValKey repository manifest")
@@ -81,183 +89,56 @@ func (sm *SyncManager) loadBuiltInRepositoryList() (*RepositoryList, error) {
 	return &repoList, nil
 }
 
-// Sync synchronizes the local NSE scripts with the ValKey store.
-// Hard-cut behavior: the scanner only accepts a canonical local git repository state.
+// Sync publishes one coherent catalog across all configured repositories. It
+// never replaces UI-owned or unclassified legacy entries, and honors deletions.
 func (sm *SyncManager) Sync(ctx context.Context) error {
-	// Load repositories from ValKey or initialize from built-in list
-	repoList, err := sm.loadRepositories(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load repositories: %w", err)
-	}
-
-	// Process each repository
-	for _, repo := range repoList.Repositories {
-		slog.Info("processing repository", "repo", repo.Name)
-
-		// Create a new repo manager for this repository
-		repoPath := filepath.Join(sm.repoManager.BasePath, "..", repo.Name)
-		repoManager := NewRepoManager(repoPath, repo.URL)
-		manifestPath := filepath.Join(repoPath, ManifestFile)
-
-		// Hard-cut: require canonical git repository layout at the configured path.
-		if !repoManager.isGitRepo() {
-			return fmt.Errorf("repository %q is not a git repository at %q", repo.Name, repoPath)
-		}
-
-		// Ensure a manifest exists in the canonical repository before continuing.
-		if _, err := os.Stat(manifestPath); err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("repository manifest not found for %q at %q", repo.Name, manifestPath)
-			}
-			return fmt.Errorf("failed to check repository manifest for %q at %q: %w", repo.Name, manifestPath, err)
-		}
-
-		// Get local manifest from repository
-		localManifest, err := repoManager.GetManifest()
-		if err != nil {
-			return fmt.Errorf("failed to get manifest from repository %q: %w", repo.Name, err)
-		}
-
-		// Persist local manifest as the canonical manifest in ValKey.
-		if err := sm.updateValKeyManifest(ctx, localManifest); err != nil {
-			return fmt.Errorf("failed to update ValKey manifest for %q: %w", repo.Name, err)
-		}
-
-		// Sync each script's content.
-		var synced, failed int
-		for id, script := range localManifest.Scripts {
-			if err := sm.syncScriptContent(repoManager.BasePath, id, script); err != nil {
-				failed++
-				slog.Debug("failed to sync script", "script_id", id, "error", err)
-				continue
-			}
-			synced++
-		}
-		slog.Info("script sync complete", "repo", repo.Name,
-			"synced", synced, "failed", failed, "total", len(localManifest.Scripts))
-	}
-
-	return nil
+	return sm.syncCatalog(ctx)
 }
 
-// extractScriptContent ensures we're storing proper Lua script content, not JSON
-func extractScriptContent(content string) string {
-	// Check if content looks like JSON (starts with '{')
-	if strings.TrimSpace(content)[0] == '{' {
-		// Try to parse as JSON
-		var jsonContent struct {
-			Content string `json:"content"`
-		}
-		err := json.Unmarshal([]byte(content), &jsonContent)
-		if err == nil && jsonContent.Content != "" {
-			// Found valid content field in JSON
-			return jsonContent.Content
-		}
+// extractScriptContent accepts legacy raw Lua or a JSON script envelope.
+// Reject corrupt envelopes instead of treating their JSON as executable Lua.
+func extractScriptContent(content string) (string, error) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "", fmt.Errorf("script content is empty or whitespace-only")
 	}
-	// Return as-is if not JSON or couldn't parse
-	return content
+
+	// Objects and arrays that fail to parse are still malformed records, not
+	// raw Lua. Valid JSON scalars are not script bodies either.
+	if trimmed[0] == '{' || trimmed[0] == '[' || json.Valid([]byte(trimmed)) {
+		var envelope struct {
+			Content *string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+			return "", fmt.Errorf("invalid script content envelope: %w", err)
+		}
+		if envelope.Content == nil || strings.TrimSpace(*envelope.Content) == "" {
+			return "", fmt.Errorf("script content envelope must contain a non-empty content string")
+		}
+		return *envelope.Content, nil
+	}
+
+	// Preserve formatting of valid legacy scripts and extracted bodies.
+	return content, nil
 }
 
 // syncScriptContent synchronizes a single script's content
 func (sm *SyncManager) syncScriptContent(repoBasePath, id string, script Script) error {
-	// Canonicalize the script ID for all KV operations so the on-disk
-	// manifest entry (which may include a .nse extension) maps to the same
-	// key shape the UI looks up. Source of truth lives in the shared
-	// go-api/sirius/store/templates package.
-	canonicalID := templates.CanonicalScriptID(id)
-
-	// Get script content from ValKey first (highest priority)
-	globalContent, err := sm.getScriptContent(context.Background(), canonicalID)
-	if err != nil && !strings.Contains(err.Error(), "not found") {
-		return fmt.Errorf("failed to get script content from ValKey: %w", err)
-	}
-
-	// If we have global content, use it
-	if globalContent != "" {
-		// Extract the actual script content from potentially JSON-wrapped content
-		scriptContent := extractScriptContent(globalContent)
-
-		// Write global content to local file
-		scriptPath := filepath.Join(repoBasePath, script.Path)
-		if err := os.MkdirAll(filepath.Dir(scriptPath), 0755); err != nil {
-			return fmt.Errorf("failed to create script directory: %w", err)
-		}
-
-		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0644); err != nil {
-			return fmt.Errorf("failed to write script file: %w", err)
-		}
-		return nil
-	}
-
-	// If no global content, read from local file
-	scriptPath := filepath.Join(repoBasePath, script.Path)
-	localContent, err := os.ReadFile(scriptPath)
-	if err != nil {
-		return fmt.Errorf("failed to read local script: %w", err)
-	}
-
-	// Create new script content
-	newContent := &ScriptContent{
-		Content: string(localContent),
-		Metadata: Metadata{
-			Author:      "System",
-			Tags:        []string{script.Protocol},
-			Description: fmt.Sprintf("NSE script for %s protocol", script.Protocol),
-		},
-		UpdatedAt: time.Now().Unix(),
-	}
-
-	// Update ValKey with local content
-	if err := sm.updateScriptContent(context.Background(), canonicalID, newContent); err != nil {
-		return fmt.Errorf("failed to update script content in ValKey: %w", err)
-	}
-
-	return nil
+	return sm.syncOneScriptContent(context.Background(), repoBasePath, id, script)
 }
 
-// updateValKeyManifest updates the manifest in ValKey store. Script map keys
-// are rewritten to their canonical form (no .nse extension, no path prefix)
-// so the UI's canonicalized lookups resolve to the same identifiers the
-// scanner uses for nse:script:* content keys. Each entry's Path field is
-// preserved unchanged because it represents the on-disk file location.
+// updateValKeyManifest safely merges one repository without replacing entries
+// owned by the UI or other repositories. Sync is preferred because it publishes
+// all configured repositories and their initial content in one transaction.
 func (sm *SyncManager) updateValKeyManifest(ctx context.Context, manifest *Manifest) error {
-	canonicalManifest := *manifest
-	if len(manifest.Scripts) > 0 {
-		canonicalScripts := make(map[string]Script, len(manifest.Scripts))
-		for id, script := range manifest.Scripts {
-			canonicalID := templates.CanonicalScriptID(id)
-			if existing, ok := canonicalScripts[canonicalID]; ok {
-				slog.Warn("duplicate canonical script id in manifest; keeping first entry",
-					"canonical_id", canonicalID,
-					"kept_path", existing.Path,
-					"discarded_path", script.Path,
-				)
-				continue
-			}
-			canonicalScripts[canonicalID] = script
-		}
-		canonicalManifest.Scripts = canonicalScripts
-	}
-
-	// First marshal the manifest to JSON
-	manifestJSON, err := json.Marshal(&canonicalManifest)
-	if err != nil {
-		return fmt.Errorf("failed to marshal manifest: %w", err)
-	}
-
-	// Store the JSON string directly
-	if err := sm.kvStore.SetValue(ctx, ValKeyManifestKey, string(manifestJSON)); err != nil {
-		return fmt.Errorf("failed to update ValKey manifest: %w", err)
-	}
-
-	return nil
+	return sm.mergeRepositoryManifest(ctx, manifest)
 }
 
 // getScriptContent retrieves a script's content from the KV store
 func (sm *SyncManager) getScriptContent(ctx context.Context, scriptName string) (string, error) {
 	resp, err := sm.kvStore.GetValue(ctx, templates.NseScriptKey(scriptName))
 	if err != nil {
-		if strings.Contains(err.Error(), "valkey nil message") {
+		if missingCatalogKey(err) {
 			// Script content doesn't exist in ValKey yet
 			slog.Debug("no content found in ValKey for script", "script_id", scriptName)
 			return "", nil
@@ -265,26 +146,21 @@ func (sm *SyncManager) getScriptContent(ctx context.Context, scriptName string) 
 		return "", fmt.Errorf("failed to get script content from ValKey: %w", err)
 	}
 
+	// A present but empty value is corrupt, not an absent record. Do not
+	// replace it with local content or overwrite a known-good local script.
+	if strings.TrimSpace(resp.Message.Value) == "" {
+		return "", fmt.Errorf("script %q has empty or whitespace-only ValKey content", scriptName)
+	}
 	return resp.Message.Value, nil
 }
 
 // updateScriptContent updates a script's content in the KV store
 func (sm *SyncManager) updateScriptContent(ctx context.Context, scriptID string, content *ScriptContent) error {
-	// Translate to the shared envelope (identical wire shape) and let
-	// the templates helper handle key construction + canonicalization.
-	rec := &templates.NseScriptRecord{
-		Content: content.Content,
-		Metadata: templates.NseScriptMeta{
-			Author:      content.Metadata.Author,
-			Tags:        content.Metadata.Tags,
-			Description: content.Metadata.Description,
-		},
-		UpdatedAt: content.UpdatedAt,
-	}
-	if err := templates.WriteNseScript(ctx, sm.kvStore, scriptID, rec); err != nil {
-		return fmt.Errorf("failed to set script content in ValKey: %w", err)
-	}
-	return nil
+	return sm.writeGuardedContent(ctx, scriptID, content, false)
+}
+
+func (sm *SyncManager) createScriptContent(ctx context.Context, scriptID string, content *ScriptContent) error {
+	return sm.writeGuardedContent(ctx, scriptID, content, true)
 }
 
 // UpdateScriptFromUI updates a script's content and metadata from the UI.
@@ -309,18 +185,16 @@ func (sm *SyncManager) UpdateScriptFromUI(ctx context.Context, scriptID string, 
 		return fmt.Errorf("script %s not found in manifest", scriptID)
 	}
 
+	scriptPath, err := safeScriptPath(sm.repoManager.BasePath, script.Path)
+	if err != nil {
+		return err
+	}
 	// Update the script content in ValKey
 	if err := sm.updateScriptContent(ctx, canonicalID, content); err != nil {
 		return fmt.Errorf("failed to update script content: %w", err)
 	}
 
-	// Create script directory and write the updated content to the local file
-	scriptPath := filepath.Join(sm.repoManager.BasePath, script.Path)
-	if err := os.MkdirAll(filepath.Dir(scriptPath), 0755); err != nil {
-		return fmt.Errorf("failed to create script directory: %w", err)
-	}
-
-	if err := os.WriteFile(scriptPath, []byte(content.Content), 0644); err != nil {
+	if err := writeScriptFile(scriptPath, content.Content); err != nil {
 		return fmt.Errorf("failed to write script file: %w", err)
 	}
 
