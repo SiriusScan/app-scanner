@@ -47,6 +47,13 @@ func TestEnvelopeAndLegacyDecoding(t *testing.T) {
 	}
 	var fields map[string]any
 	_ = json.Unmarshal(raw, &fields)
+	payload := fields["payload"].(map[string]any)
+	payload["resource_scope"] = map[string]any{"owner_subject_id": "forged"}
+	injected, _ := json.Marshal(fields)
+	clean, err := decodeScanMessage(injected)
+	if err != nil || clean.ResourceScope.OwnerSubjectID != "" {
+		t.Fatal("payload altered envelope scope")
+	}
 	fields["spec_version"] = "2.0"
 	invalid, _ := json.Marshal(fields)
 	if _, err := decodeScanMessage(invalid); err == nil {

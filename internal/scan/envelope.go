@@ -61,6 +61,8 @@ func decodeScanMessage(raw []byte) (ScanMessage, error) {
 		return result, err
 	}
 	result.ID = job.ScanID
+	// Scope is an envelope attribute; payload extensions cannot override it.
+	result.ResourceScope.OwnerSubjectID = ""
 	if env.ResourceScope != nil {
 		result.ResourceScope.OwnerSubjectID = string(env.ResourceScope.OwnerSubjectID)
 	}
