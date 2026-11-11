@@ -22,6 +22,7 @@ const maxScanUpdateAttempts = 8
 type ScanUpdater struct {
 	kvStore store.KVStore
 	mu      sync.Mutex
+	keyed   bool
 }
 
 func NewScanUpdater(kv store.KVStore) *ScanUpdater { return &ScanUpdater{kvStore: kv} }
@@ -46,11 +47,18 @@ func (su *ScanUpdater) update(ctx context.Context, scanID string, modifier func(
 	if scanID != "" && !atomic {
 		return fmt.Errorf("scan updates require atomic compare-and-set support")
 	}
+	key := "currentScan"
+	if su.keyed {
+		if scanID == "" {
+			return fmt.Errorf("scan ID is required for keyed state")
+		}
+		key = "scan:" + scanID
+	}
 	for attempt := 0; attempt < maxScanUpdateAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		val, err := su.kvStore.GetValue(ctx, "currentScan")
+		val, err := su.kvStore.GetValue(ctx, key)
 		if err != nil {
 			return fmt.Errorf("error getting current scan: %w", err)
 		}
@@ -107,14 +115,14 @@ func (su *ScanUpdater) update(ctx context.Context, scanID string, modifier func(
 		}
 		encoded := base64.StdEncoding.EncodeToString(updatedJSON)
 		if atomic {
-			swapped, err := cas.CompareAndSetValue(ctx, "currentScan", val.Message.Value, encoded)
+			swapped, err := cas.CompareAndSetValue(ctx, key, val.Message.Value, encoded)
 			if err != nil {
 				return fmt.Errorf("error updating scan in KV store: %w", err)
 			}
 			if !swapped {
 				continue
 			}
-		} else if err := su.kvStore.SetValue(ctx, "currentScan", encoded); err != nil {
+		} else if err := su.kvStore.SetValue(ctx, key, encoded); err != nil {
 			return fmt.Errorf("error updating scan in KV store: %w", err)
 		}
 		return nil

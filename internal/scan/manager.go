@@ -66,11 +66,15 @@ type ScanOptions struct {
 
 // ScanMessage represents the incoming scan request message
 type ScanMessage struct {
-	ID          string      `json:"id"`           // Unique identifier for this scan
-	Targets     []Target    `json:"targets"`      // List of targets to scan
-	Options     ScanOptions `json:"options"`      // Scan configuration options
-	Priority    int         `json:"priority"`     // Scan priority (1-5)
-	CallbackURL string      `json:"callback_url"` // Optional webhook for scan completion
+	ID            string      `json:"id"`                   // Unique identifier for this scan
+	Targets       []Target    `json:"targets"`              // List of targets to scan
+	Options       ScanOptions `json:"options"`              // Scan configuration options
+	Priority      int         `json:"priority"`             // Scan priority (1-5)
+	CallbackURL   string      `json:"callback_url"`         // Optional webhook for scan completion
+	StateMode     string      `json:"state_mode,omitempty"` // "keyed" uses scan:<id>; empty retains legacy state
+	ResourceScope struct {
+		OwnerSubjectID string `json:"owner_subject_id,omitempty"`
+	} `json:"resource_scope,omitempty"`
 }
 
 // ScanManager manages scan operations.
@@ -96,6 +100,8 @@ type ScanManager struct {
 	activeScanCancel context.CancelFunc // Cancel function for the current scan
 	scanMutex        sync.Mutex         // Protects scan state during cancellation
 	isCancelling     bool               // Flag to indicate cancellation in progress
+	keyedRuns        map[string]*ScanManager
+	coordinator      *ScanManager
 }
 
 // SourcedHostRequest represents the request structure for source-aware API submissions
@@ -367,10 +373,24 @@ func (sm *ScanManager) handleMessage(msg string) {
 	// then retains this run's identity, options and cancellation context.
 	if err := sm.validateScanMessage(&scanMsg); err != nil {
 		slog.Error("Invalid scan configuration", "error", err)
-		sm.failScan(scanMsg.ID)
+		if scanMsg.ResourceScope.OwnerSubjectID != "" {
+			return
+		}
+		if scanMsg.StateMode == "keyed" {
+			state := &ScanManager{scanUpdater: &ScanUpdater{kvStore: sm.kvStore, keyed: true}}
+			state.failScan(scanMsg.ID)
+		} else if scanMsg.StateMode == "" {
+			sm.failScan(scanMsg.ID)
+		}
 		return
 	}
-	run, err := sm.newScanRun(scanMsg.ID)
+	var run *ScanManager
+	var err error
+	if scanMsg.StateMode == "keyed" {
+		run, err = sm.newKeyedRun(scanMsg.ID)
+	} else {
+		run, err = sm.newScanRun(scanMsg.ID)
+	}
 	if err != nil {
 		slog.Warn("Ignoring scan request", "scan_id", scanMsg.ID, "error", err)
 		return
@@ -436,6 +456,12 @@ func (sm *ScanManager) handleScanMessage(scanMsg ScanMessage) {
 
 // validateScanMessage performs validation on the scan message
 func (sm *ScanManager) validateScanMessage(msg *ScanMessage) error {
+	if msg.ResourceScope.OwnerSubjectID != "" {
+		return fmt.Errorf("non-global resource scope is unsupported by scanner ingestion")
+	}
+	if msg.StateMode != "" && msg.StateMode != "keyed" {
+		return fmt.Errorf("unsupported scan state mode")
+	}
 	if strings.TrimSpace(msg.ID) == "" {
 		return fmt.Errorf("scan ID is required")
 	}
@@ -494,6 +520,7 @@ func (sm *ScanManager) scheduleTargets(targetIPs []string) {
 		return nil
 	}); err != nil {
 		slog.Warn("Cannot schedule scan", "scan_id", sm.currentScanID, "error", err)
+		sm.finishKeyedRun()
 		return
 	}
 	sm.logger.LogScanStarted(sm.currentScanID, targetIPs, map[string]interface{}{
@@ -722,6 +749,7 @@ func (sm *ScanManager) markHostComplete(ip string) error {
 				"hosts_discovered": len(updated.Hosts), "hosts_completed": updated.HostsCompleted,
 				"vulnerabilities_found": len(updated.Vulnerabilities), "total_hosts": len(updated.Hosts),
 			})
+			sm.finishKeyedRun()
 		}
 	}
 	return nil
@@ -1021,6 +1049,7 @@ type ControlMessage struct {
 	Action    string `json:"action"`    // Action to perform (e.g., "cancel")
 	ScanID    string `json:"scan_id"`   // Required: exact scan to cancel
 	Timestamp string `json:"timestamp"` // When the command was issued
+	StateMode string `json:"state_mode,omitempty"`
 }
 
 // ListenForCancelCommands starts listening for scan control commands on the scan_control queue.
@@ -1040,6 +1069,15 @@ func (sm *ScanManager) handleControlMessage(msg string) {
 	}
 
 	slog.Debug("Received control command", "action", cmd.Action, "scan_id", cmd.ScanID, "timestamp", cmd.Timestamp)
+	if cmd.StateMode == "keyed" {
+		if cmd.Action == "cancel" || cmd.Action == "force_cancel" {
+			sm.cancelKeyedRun(cmd.ScanID)
+		}
+		return
+	}
+	if cmd.StateMode != "" {
+		return
+	}
 
 	switch cmd.Action {
 	case "cancel":
@@ -1104,6 +1142,7 @@ func (sm *ScanManager) updateScanStatus(status string) {
 	sm.setScanStatus(sm.currentScanID, status)
 	if status == "failed" && sm.cancel != nil {
 		sm.cancel()
+		sm.finishKeyedRun()
 	}
 }
 

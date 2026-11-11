@@ -86,6 +86,71 @@ func (sm *ScanManager) newScanRun(scanID string) (*ScanManager, error) {
 	return run, nil
 }
 
+// newKeyedRun never consults currentScan. The producer must create scan:<id>
+// before publishing a keyed request; missing or mismatched state fails closed.
+func (sm *ScanManager) newKeyedRun(scanID string) (*ScanManager, error) {
+	sm.scanMutex.Lock()
+	defer sm.scanMutex.Unlock()
+	if sm.keyedRuns == nil {
+		sm.keyedRuns = make(map[string]*ScanManager)
+	}
+	if _, exists := sm.keyedRuns[scanID]; exists {
+		return nil, fmt.Errorf("scan is already active")
+	}
+	updater := &ScanUpdater{kvStore: sm.kvStore, keyed: true}
+	var status string
+	if err := updater.UpdateForScan(sm.ctx, scanID, func(scan *store.ScanResult) error { status = scan.Status; return nil }); err != nil {
+		return nil, err
+	}
+	if status == "cancelling" {
+		run := &ScanManager{scanUpdater: updater}
+		_, err := run.setScanStatus(scanID, "cancelled")
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("scan is not active")
+	}
+	if scanIsTerminal(status) {
+		return nil, fmt.Errorf("scan is not active")
+	}
+	ctx, cancel := context.WithCancel(sm.ctx)
+	run := sm.executionSnapshot(ctx, scanID, ScanOptions{})
+	run.cancel, run.coordinator, run.scanUpdater = cancel, sm, updater
+	sm.keyedRuns[scanID] = run
+	return run, nil
+}
+
+func (sm *ScanManager) finishKeyedRun() {
+	if sm.coordinator == nil {
+		return
+	}
+	c := sm.coordinator
+	c.scanMutex.Lock()
+	if c.keyedRuns[sm.currentScanID] == sm {
+		delete(c.keyedRuns, sm.currentScanID)
+	}
+	c.scanMutex.Unlock()
+	sm.cancel()
+}
+
+func (sm *ScanManager) cancelKeyedRun(scanID string) {
+	if scanID == "" {
+		return
+	}
+	sm.scanMutex.Lock()
+	defer sm.scanMutex.Unlock()
+	run := sm.keyedRuns[scanID]
+	if run != nil {
+		run.cancel()
+		delete(sm.keyedRuns, scanID)
+	}
+	updater := &ScanUpdater{kvStore: sm.kvStore, keyed: true}
+	state := &ScanManager{scanUpdater: updater}
+	if _, err := state.setScanStatus(scanID, "cancelled"); err != nil {
+		return
+	}
+}
+
 func (sm *ScanManager) forHostPorts(portList string) *ScanManager {
 	options := cloneScanOptions(sm.currentScanOptions)
 	if portList != "" {
