@@ -20,9 +20,10 @@ const maxScanUpdateAttempts = 8
 // ScanUpdater serializes updates made by this scanner. Cross-process writers
 // also need a store-level compare-and-set contract; this mutex alone is not one.
 type ScanUpdater struct {
-	kvStore store.KVStore
-	mu      sync.Mutex
-	keyed   bool
+	kvStore   store.KVStore
+	mu        sync.Mutex
+	keyed     bool
+	subjectID string
 }
 
 func NewScanUpdater(kv store.KVStore) *ScanUpdater { return &ScanUpdater{kvStore: kv} }
@@ -65,6 +66,23 @@ func (su *ScanUpdater) update(ctx context.Context, scanID string, modifier func(
 		decodedJSON, err := base64.StdEncoding.DecodeString(val.Message.Value)
 		if err != nil {
 			return fmt.Errorf("error decoding Base64: %w", err)
+		}
+		if su.keyed {
+			var record struct {
+				Scope *struct {
+					OwnerSubjectID string `json:"owner_subject_id"`
+				} `json:"resource_scope"`
+			}
+			if err := json.Unmarshal(decodedJSON, &record); err != nil {
+				return fmt.Errorf("invalid keyed scope: %w", err)
+			}
+			owner := ""
+			if record.Scope != nil {
+				owner = record.Scope.OwnerSubjectID
+			}
+			if owner != su.subjectID {
+				return fmt.Errorf("keyed scan scope mismatch")
+			}
 		}
 		var scan *store.ScanResult
 		if err := json.Unmarshal(decodedJSON, &scan); err != nil {

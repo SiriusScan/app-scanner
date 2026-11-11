@@ -3,7 +3,7 @@
 Legacy requests omit `state_mode` and use the shared `currentScan` record. A
 producer that needs independently scheduled scans sets `"state_mode":"keyed"`
 and creates the existing base64-encoded ScanResult at `scan:<id>` before
-publishing. The record's `id` must match the request. The scanner requires
+publishing. The record's `id` and `resource_scope.owner_subject_id` must match the request. Omitted scope denotes only the global scope. Every state update and cancellation checks the persisted scope before it changes state or cancels work. The scanner requires
 compare-and-set support and never falls back to `currentScan` for keyed requests.
 Control messages must include the exact scan ID and matching scope. The producer
 owns state creation, retention, authorization and duplicate suppression.

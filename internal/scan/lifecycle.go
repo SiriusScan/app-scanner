@@ -102,7 +102,7 @@ func (sm *ScanManager) newKeyedRunForSubject(scanID, subjectID string) (*ScanMan
 	if _, exists := sm.keyedRuns[scanID]; exists {
 		return nil, fmt.Errorf("scan is already active")
 	}
-	updater := &ScanUpdater{kvStore: sm.kvStore, keyed: true}
+	updater := &ScanUpdater{kvStore: sm.kvStore, keyed: true, subjectID: subjectID}
 	var status string
 	if err := updater.UpdateForScan(sm.ctx, scanID, func(scan *store.ScanResult) error { status = scan.Status; return nil }); err != nil {
 		return nil, err
@@ -149,14 +149,14 @@ func (sm *ScanManager) cancelKeyedRun(scanID, subjectID string) {
 	if run != nil && run.subjectID != subjectID {
 		return
 	}
-	if run != nil {
-		run.cancel()
-		delete(sm.keyedRuns, scanID)
-	}
-	updater := &ScanUpdater{kvStore: sm.kvStore, keyed: true}
+	updater := &ScanUpdater{kvStore: sm.kvStore, keyed: true, subjectID: subjectID}
 	state := &ScanManager{scanUpdater: updater}
 	if _, err := state.setScanStatus(scanID, "cancelled"); err != nil {
 		return
+	}
+	if run != nil {
+		run.cancel()
+		delete(sm.keyedRuns, scanID)
 	}
 }
 

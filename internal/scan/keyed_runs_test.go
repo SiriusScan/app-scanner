@@ -2,6 +2,8 @@ package scan
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"testing"
 )
 
@@ -54,7 +56,7 @@ func TestRejectNonGlobalScope(t *testing.T) {
 }
 
 func TestKeyedCancellationRequiresMatchingLiveScope(t *testing.T) {
-	kv := &fakeKVStore{data: map[string]string{"scan:a": encodeTestScan(t, activeTestScan("a", 1))}}
+	kv := &fakeKVStore{data: map[string]string{"scan:a": encodeScopedScan(t, "a", "alice")}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sm := &ScanManager{ctx: ctx, kvStore: kv}
@@ -73,5 +75,40 @@ func TestKeyedCancellationRequiresMatchingLiveScope(t *testing.T) {
 	sm.cancelKeyedRun("a", "alice")
 	if run.ctx.Err() == nil {
 		t.Fatal("matching subject did not cancel scan")
+	}
+}
+
+func encodeScopedScan(t *testing.T, id, subject string) string {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString(encodeTestScan(t, activeTestScan(id, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["resource_scope"] = map[string]string{"owner_subject_id": subject}
+	data, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(data)
+}
+func TestQueuedCancellationChecksPersistedScope(t *testing.T) {
+	kv := &fakeKVStore{data: map[string]string{"scan:a": encodeScopedScan(t, "a", "alice")}}
+	sm := &ScanManager{ctx: context.Background(), kvStore: kv}
+	before := kv.data["scan:a"]
+	sm.cancelKeyedRun("a", "bob")
+	sm.cancelKeyedRun("a", "")
+	if kv.data["scan:a"] != before {
+		t.Fatal("wrong or absent subject mutated queued scan")
+	}
+	sm.cancelKeyedRun("a", "alice")
+	if kv.data["scan:a"] == before {
+		t.Fatal("matching scope did not cancel queued scan")
+	}
+	if _, err := sm.newKeyedRunForSubject("a", "bob"); err == nil {
+		t.Fatal("wrong subject accepted")
 	}
 }

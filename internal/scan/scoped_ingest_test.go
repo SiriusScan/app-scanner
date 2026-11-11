@@ -42,10 +42,10 @@ func TestScopedHostFailureMarksScanFailed(t *testing.T) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-	kv := &fakeKVStore{data: map[string]string{"scan:a": encodeTestScan(t, activeTestScan("a", 1))}}
+	kv := &fakeKVStore{data: map[string]string{"scan:a": encodeScopedScan(t, "a", "alice")}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sm := &ScanManager{ctx: ctx, cancel: cancel, currentScanID: "a", subjectID: "alice", scopedIngestURL: srv.URL, apiHTTPClient: srv.Client(), scanUpdater: &ScanUpdater{kvStore: kv, keyed: true}}
+	sm := &ScanManager{ctx: ctx, cancel: cancel, currentScanID: "a", subjectID: "alice", scopedIngestURL: srv.URL, apiHTTPClient: srv.Client(), scanUpdater: &ScanUpdater{kvStore: kv, keyed: true, subjectID: "alice"}}
 	if err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture"); err == nil {
 		t.Fatal("expected scoped ingest failure")
 	}
