@@ -43,6 +43,7 @@ func (sm *ScanManager) executionSnapshot(ctx context.Context, scanID string, opt
 		toolFactory: factory, workerPool: sm.workerPool,
 		templateManager: sm.templateManager, scanUpdater: sm.scanUpdater,
 		kvStore: sm.kvStore, apiBaseURL: sm.apiBaseURL,
+		scopedIngestURL: sm.scopedIngestURL, subjectID: sm.subjectID,
 		apiHTTPClient: sm.apiHTTPClient, logger: sm.logger,
 	}
 }
@@ -89,6 +90,10 @@ func (sm *ScanManager) newScanRun(scanID string) (*ScanManager, error) {
 // newKeyedRun never consults currentScan. The producer must create scan:<id>
 // before publishing a keyed request; missing or mismatched state fails closed.
 func (sm *ScanManager) newKeyedRun(scanID string) (*ScanManager, error) {
+	return sm.newKeyedRunForSubject(scanID, "")
+}
+
+func (sm *ScanManager) newKeyedRunForSubject(scanID, subjectID string) (*ScanManager, error) {
 	sm.scanMutex.Lock()
 	defer sm.scanMutex.Unlock()
 	if sm.keyedRuns == nil {
@@ -116,6 +121,7 @@ func (sm *ScanManager) newKeyedRun(scanID string) (*ScanManager, error) {
 	ctx, cancel := context.WithCancel(sm.ctx)
 	run := sm.executionSnapshot(ctx, scanID, ScanOptions{})
 	run.cancel, run.coordinator, run.scanUpdater = cancel, sm, updater
+	run.subjectID = subjectID
 	sm.keyedRuns[scanID] = run
 	return run, nil
 }
@@ -133,13 +139,16 @@ func (sm *ScanManager) finishKeyedRun() {
 	sm.cancel()
 }
 
-func (sm *ScanManager) cancelKeyedRun(scanID string) {
+func (sm *ScanManager) cancelKeyedRun(scanID, subjectID string) {
 	if scanID == "" {
 		return
 	}
 	sm.scanMutex.Lock()
 	defer sm.scanMutex.Unlock()
 	run := sm.keyedRuns[scanID]
+	if run != nil && run.subjectID != subjectID {
+		return
+	}
 	if run != nil {
 		run.cancel()
 		delete(sm.keyedRuns, scanID)

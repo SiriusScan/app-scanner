@@ -28,7 +28,7 @@ func TestKeyedRunsRemainIndependent(t *testing.T) {
 	if _, err := sm.newKeyedRun("a"); err == nil {
 		t.Fatal("duplicate accepted")
 	}
-	sm.cancelKeyedRun("a")
+	sm.cancelKeyedRun("a", "")
 	if a.ctx.Err() == nil || b.ctx.Err() != nil {
 		t.Fatal("cancellation affected wrong run")
 	}
@@ -50,5 +50,28 @@ func TestRejectNonGlobalScope(t *testing.T) {
 	msg.ResourceScope.OwnerSubjectID = ""
 	if err := (&ScanManager{}).validateScanMessage(&msg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestKeyedCancellationRequiresMatchingLiveScope(t *testing.T) {
+	kv := &fakeKVStore{data: map[string]string{"scan:a": encodeTestScan(t, activeTestScan("a", 1))}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sm := &ScanManager{ctx: ctx, kvStore: kv}
+	run, err := sm.newKeyedRunForSubject("a", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm.cancelKeyedRun("a", "bob")
+	if run.ctx.Err() != nil {
+		t.Fatal("wrong subject cancelled scan")
+	}
+	sm.cancelKeyedRun("a", "")
+	if run.ctx.Err() != nil {
+		t.Fatal("global control cancelled scoped scan")
+	}
+	sm.cancelKeyedRun("a", "alice")
+	if run.ctx.Err() == nil {
+		t.Fatal("matching subject did not cancel scan")
 	}
 }

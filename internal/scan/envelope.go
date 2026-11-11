@@ -17,7 +17,9 @@ func decodeEnvelope(raw []byte) (*message.Envelope, bool, error) {
 	if fields == nil {
 		return nil, false, fmt.Errorf("message must be an object")
 	}
-	if rawScope, ok := fields["resource_scope"]; ok && string(rawScope) != "null" {
+	_, versioned := fields["spec_version"]
+	_, payload := fields["payload"]
+	if rawScope, ok := fields["resource_scope"]; ok && string(rawScope) != "null" && !versioned && !payload {
 		var requested struct {
 			OwnerSubjectID string `json:"owner_subject_id"`
 		}
@@ -28,16 +30,12 @@ func decodeEnvelope(raw []byte) (*message.Envelope, bool, error) {
 			return nil, false, fmt.Errorf("non-global scope unsupported by scanner ingestion")
 		}
 	}
-	_, versioned := fields["spec_version"]
-	if _, payload := fields["payload"]; !versioned && !payload {
+	if !versioned && !payload {
 		return nil, false, nil
 	}
 	var env message.Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, true, err
-	}
-	if env.ResourceScope != nil && !env.ResourceScope.IsGlobal() {
-		return nil, true, fmt.Errorf("non-global scope unsupported by scanner ingestion")
 	}
 	return &env, true, nil
 }
@@ -63,6 +61,9 @@ func decodeScanMessage(raw []byte) (ScanMessage, error) {
 		return result, err
 	}
 	result.ID = job.ScanID
+	if env.ResourceScope != nil {
+		result.ResourceScope.OwnerSubjectID = string(env.ResourceScope.OwnerSubjectID)
+	}
 	if result.Priority == 0 {
 		result.Priority = 1
 	}
@@ -87,5 +88,8 @@ func decodeControlMessage(raw []byte) (ControlMessage, error) {
 		return result, fmt.Errorf("versioned scan control requires keyed state")
 	}
 	result.ScanID, result.Action, result.StateMode = control.ScanID, control.Action, control.StateMode
+	if env.ResourceScope != nil {
+		result.SubjectID = string(env.ResourceScope.OwnerSubjectID)
+	}
 	return result, nil
 }

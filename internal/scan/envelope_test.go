@@ -35,8 +35,15 @@ func TestEnvelopeAndLegacyDecoding(t *testing.T) {
 	if err != nil || got.ID != "a" || got.StateMode != "keyed" || got.Priority != 1 {
 		t.Fatalf("job %+v: %v", got, err)
 	}
-	if _, err := decodeScanMessage(envelopeTestData(t, message.ScanRequested, job, "subject")); err == nil {
-		t.Fatal("accepted scoped job")
+	scoped, err := decodeScanMessage(envelopeTestData(t, message.ScanRequested, job, "subject"))
+	if err != nil || scoped.ResourceScope.OwnerSubjectID != "subject" {
+		t.Fatalf("scope not propagated: %+v, %v", scoped, err)
+	}
+	if err := (&ScanManager{}).validateScanMessage(&scoped); err == nil {
+		t.Fatal("accepted scoped job without endpoint")
+	}
+	if err := (&ScanManager{scopedIngestURL: "https://example.test/ingest"}).validateScanMessage(&scoped); err != nil {
+		t.Fatal(err)
 	}
 	var fields map[string]any
 	_ = json.Unmarshal(raw, &fields)
@@ -59,7 +66,8 @@ func TestEnvelopeAndLegacyDecoding(t *testing.T) {
 	if err != nil || c.ScanID != "a" || c.StateMode != "keyed" {
 		t.Fatalf("control %+v: %v", c, err)
 	}
-	if _, err := decodeControlMessage(envelopeTestData(t, message.ScanCancelRequested, ctrl, "subject")); err == nil {
-		t.Fatal("accepted scoped control")
+	c, err = decodeControlMessage(envelopeTestData(t, message.ScanCancelRequested, ctrl, "subject"))
+	if err != nil || c.SubjectID != "subject" {
+		t.Fatalf("scope not propagated: %+v %v", c, err)
 	}
 }

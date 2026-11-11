@@ -92,6 +92,8 @@ type ScanManager struct {
 	scanUpdater        *ScanUpdater
 	kvStore            store.KVStore
 	apiBaseURL         string       // API base URL for source-aware submissions
+	scopedIngestURL    string       // Explicit trusted endpoint for subject-scoped observations
+	subjectID          string       // Opaque subject for this run, empty for global
 	apiHTTPClient      *http.Client // Shared HTTP client for API submissions
 	logger             scanLogger   // Centralized logging client
 
@@ -142,6 +144,7 @@ func NewScanManager(kvStore store.KVStore, toolFactory *ScanToolFactory, updater
 		nseSync:         syncManager,
 		templateManager: templateManager,
 		apiBaseURL:      apiBaseURL,
+		scopedIngestURL: os.Getenv("SIRIUS_SCOPED_HOST_INGEST_URL"),
 		apiHTTPClient:   &http.Client{Timeout: apiRequestTimeout},
 		logger:          NewLoggingClient(),
 		scanStrategies: map[string]ScanStrategy{
@@ -275,7 +278,12 @@ func (sm *ScanManager) createScanSource(toolName string) models.ScanSource {
 }
 
 // submitHostWithSource submits host data using the source-aware API endpoint
-func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) error {
+func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) (resultErr error) {
+	defer func() {
+		if sm.subjectID != "" && resultErr != nil {
+			sm.updateScanStatus("failed")
+		}
+	}()
 	source := sm.createScanSource(toolName)
 
 	request := SourcedHostRequest{
@@ -289,6 +297,12 @@ func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) e
 	}
 
 	url := fmt.Sprintf("%s/host/with-source", sm.apiBaseURL)
+	if sm.subjectID != "" {
+		if sm.scopedIngestURL == "" {
+			return fmt.Errorf("scoped ingestion endpoint is required")
+		}
+		url = sm.scopedIngestURL
+	}
 	requestCtx, cancel := context.WithTimeout(sm.ctx, apiRequestTimeout)
 	defer cancel()
 
@@ -297,6 +311,9 @@ func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) e
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if sm.subjectID != "" {
+		req.Header.Set("X-Sirius-Resource-Subject", sm.subjectID)
+	}
 	serviceKey, keyErr := infraauth.LoadSiriusAPIKey()
 	if keyErr != nil {
 		return fmt.Errorf("internal API key required for scanner API calls: %w", keyErr)
@@ -312,7 +329,7 @@ func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) e
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("API returned status %d for %s: %s", resp.StatusCode, url, strings.TrimSpace(string(body)))
 	}
@@ -387,7 +404,7 @@ func (sm *ScanManager) handleMessage(msg string) {
 	var run *ScanManager
 	err = nil
 	if scanMsg.StateMode == "keyed" {
-		run, err = sm.newKeyedRun(scanMsg.ID)
+		run, err = sm.newKeyedRunForSubject(scanMsg.ID, scanMsg.ResourceScope.OwnerSubjectID)
 	} else {
 		run, err = sm.newScanRun(scanMsg.ID)
 	}
@@ -456,8 +473,8 @@ func (sm *ScanManager) handleScanMessage(scanMsg ScanMessage) {
 
 // validateScanMessage performs validation on the scan message
 func (sm *ScanManager) validateScanMessage(msg *ScanMessage) error {
-	if msg.ResourceScope.OwnerSubjectID != "" {
-		return fmt.Errorf("non-global resource scope is unsupported by scanner ingestion")
+	if msg.ResourceScope.OwnerSubjectID != "" && (sm.scopedIngestURL == "" || msg.StateMode != "keyed") {
+		return fmt.Errorf("non-global scope requires keyed state and a trusted scoped ingestion endpoint")
 	}
 	if msg.StateMode != "" && msg.StateMode != "keyed" {
 		return fmt.Errorf("unsupported scan state mode")
@@ -1050,6 +1067,7 @@ type ControlMessage struct {
 	ScanID    string `json:"scan_id"`   // Required: exact scan to cancel
 	Timestamp string `json:"timestamp"` // When the command was issued
 	StateMode string `json:"state_mode,omitempty"`
+	SubjectID string `json:"-"`
 }
 
 // ListenForCancelCommands starts listening for scan control commands on the scan_control queue.
@@ -1067,11 +1085,14 @@ func (sm *ScanManager) handleControlMessage(msg string) {
 		slog.Error("Invalid control message", "error", err)
 		return
 	}
+	if cmd.SubjectID != "" && sm.scopedIngestURL == "" {
+		return
+	}
 
 	slog.Debug("Received control command", "action", cmd.Action, "scan_id", cmd.ScanID, "timestamp", cmd.Timestamp)
 	if cmd.StateMode == "keyed" {
 		if cmd.Action == "cancel" || cmd.Action == "force_cancel" {
-			sm.cancelKeyedRun(cmd.ScanID)
+			sm.cancelKeyedRun(cmd.ScanID, cmd.SubjectID)
 		}
 		return
 	}
