@@ -362,8 +362,8 @@ func (sm *ScanManager) ListenForScans() {
 
 // handleMessage processes incoming scan requests
 func (sm *ScanManager) handleMessage(msg string) {
-	var scanMsg ScanMessage
-	if err := json.Unmarshal([]byte(msg), &scanMsg); err != nil {
+	scanMsg, err := decodeScanMessage([]byte(msg))
+	if err != nil {
 		slog.Error("Invalid scan message", "error", err)
 		sm.logger.LogScanError("unknown", "unknown", "message_parse_error", "Failed to parse scan message", err)
 		return
@@ -385,7 +385,7 @@ func (sm *ScanManager) handleMessage(msg string) {
 		return
 	}
 	var run *ScanManager
-	var err error
+	err = nil
 	if scanMsg.StateMode == "keyed" {
 		run, err = sm.newKeyedRun(scanMsg.ID)
 	} else {
@@ -1062,8 +1062,8 @@ func (sm *ScanManager) ListenForCancelCommands() {
 
 // handleControlMessage processes incoming control commands
 func (sm *ScanManager) handleControlMessage(msg string) {
-	var cmd ControlMessage
-	if err := json.Unmarshal([]byte(msg), &cmd); err != nil {
+	cmd, err := decodeControlMessage([]byte(msg))
+	if err != nil {
 		slog.Error("Invalid control message", "error", err)
 		return
 	}

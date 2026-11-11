@@ -7,7 +7,7 @@ toolchain go1.24.1
 replace github.com/SiriusScan/ping++ => ../ping++ //Development
 
 require (
-	github.com/SiriusScan/go-api v0.0.19-0.20261108104525-3299d88469f0
+	github.com/SiriusScan/go-api v0.0.24
 	github.com/SiriusScan/ping++ v0.0.0
 	github.com/lair-framework/go-nmap v0.0.0-20191202052157-3507e0b03523
 	github.com/projectdiscovery/goflags v0.1.68

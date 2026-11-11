@@ -14,3 +14,10 @@ this mode for subject-isolated inventory until scoped ingestion is available.
 The producer owns initial state, retention and authorization of job and control
 messages. The queue may redeliver, so producers must not reset active or terminal
 records to dispatch duplicate jobs.
+
+The scanner also accepts `sirius.scan.requested` and
+`sirius.scan.cancel.requested` envelopes at spec and payload version `1.0`
+from the public go-api message contract. Versioned payloads must use keyed
+state. Unknown versions, malformed envelopes, and non-global resource scopes
+are rejected before state is touched. Legacy messages remain supported for
+Community deployments.
