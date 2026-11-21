@@ -34,12 +34,29 @@ func TestKeyedRunsRemainIndependent(t *testing.T) {
 	if a.ctx.Err() == nil || b.ctx.Err() != nil {
 		t.Fatal("cancellation affected wrong run")
 	}
-	if _, err := sm.newKeyedRun("missing"); err == nil {
-		t.Fatal("missing keyed state fell back to global")
+	// Missing keyed state is created from the job itself; it must never be
+	// read out of the legacy global slot.
+	missing, err := sm.newKeyedRun("missing")
+	if err != nil {
+		t.Fatalf("missing keyed state not self-created: %v", err)
 	}
-	if _, err := sm.newKeyedRun("global"); err == nil {
-		t.Fatal("global state used for keyed scan")
+	created, _ := readKeyedTestScan(t, kv, "missing")
+	if created.ID != "missing" || created.Status != "running" || len(created.Hosts) != 0 || len(created.SubScans) != 0 {
+		t.Fatalf("self-created keyed state is not fresh: %+v", created)
 	}
+	missing.finishKeyedRun()
+	globalRun, err := sm.newKeyedRun("global")
+	if err != nil {
+		t.Fatalf("keyed scan named like the global one not self-created: %v", err)
+	}
+	created, _ = readKeyedTestScan(t, kv, "global")
+	if len(created.SubScans) != 0 {
+		t.Fatalf("global currentScan state used for keyed scan: %+v", created)
+	}
+	if got := readTestScan(t, kv); got.ID != "global" || len(got.SubScans) == 0 {
+		t.Fatalf("legacy global state mutated by keyed admission: %+v", got)
+	}
+	globalRun.finishKeyedRun()
 	b.finishKeyedRun()
 }
 

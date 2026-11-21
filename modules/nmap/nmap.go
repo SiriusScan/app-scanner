@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/SiriusScan/app-scanner/internal/nse"
@@ -398,7 +399,7 @@ func extractVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 					vuln := sirius.Vulnerability{
 						VID:         cve,
 						Title:       cve, // Just use the CVE ID as the title
-						Description: result.Output,
+						Description: evidenceFor(result.Output, cve),
 						RiskScore:   7.5, // Default high severity for SMB vulnerabilities
 					}
 					vulns = append(vulns, vuln)
@@ -408,7 +409,7 @@ func extractVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 				vuln := sirius.Vulnerability{
 					VID:         fmt.Sprintf("%s-vulnerability", result.ID),
 					Title:       fmt.Sprintf("SMB Vulnerability: %s", result.ID),
-					Description: result.Output,
+					Description: boundedEvidence(result.Output),
 					RiskScore:   7.5, // Default high severity
 				}
 				vulns = append(vulns, vuln)
@@ -434,7 +435,7 @@ func extractVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 				vuln := sirius.Vulnerability{
 					VID:         cve,
 					Title:       cve, // Just use the CVE ID as the title
-					Description: result.Output,
+					Description: evidenceFor(result.Output, cve),
 					RiskScore:   severity,
 				}
 
@@ -447,29 +448,94 @@ func extractVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 	return vulns
 }
 
-// extractVulnersVulnerabilities processes vulners script output specifically
+// maxEvidenceLen bounds the scanner evidence stored per finding. Findings
+// carry the evidence for that one CVE, never the whole script output:
+// copying full output into every finding made host reports grow with the
+// square of the finding count.
+const maxEvidenceLen = 512
+
+func boundedEvidence(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > maxEvidenceLen {
+		return s[:maxEvidenceLen]
+	}
+	return s
+}
+
+// evidenceFor returns the output line mentioning cve, or a bounded excerpt
+// of the whole output when no single line carries it.
+func evidenceFor(output, cve string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, cve) {
+			return boundedEvidence(line)
+		}
+	}
+	return boundedEvidence(output)
+}
+
+// vulnersScore parses the CVSS score vulners prints after the CVE ID, e.g.
+// "CVE-2021-41773  7.5  https://vulners.com/cve/CVE-2021-41773".
+func vulnersScore(line, cve string) float64 {
+	fields := strings.Fields(line)
+	for i, field := range fields {
+		if field != cve || i+1 >= len(fields) {
+			continue
+		}
+		if score, err := strconv.ParseFloat(fields[i+1], 64); err == nil && score >= 0 && score <= 10 {
+			return score
+		}
+	}
+	return 0
+}
+
+// extractVulnersVulnerabilities processes vulners script output specifically.
+// Each finding keeps its own evidence line (prefixed with the CPE it matched)
+// and the CVSS score vulners reported; unknown scores stay 0 rather than
+// being fabricated.
 func extractVulnersVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 	var vulns []sirius.Vulnerability
-
-	// Extract CVEs from vulners output
-	cves := extractCVEsFromText(result.Output)
-	for _, cve := range cves {
-		// Try to get structured info from the elements
-		var description string
-		if desc, ok := result.Elements[cve]; ok {
-			description = desc
-		} else {
-			description = result.Output
+	seen := make(map[string]bool)
+	cpe := ""
+	for _, line := range strings.Split(result.Output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "cpe:") {
+			cpe = strings.TrimSuffix(trimmed, ":")
+			continue
 		}
-
+		for _, cve := range extractCVEsFromText(line) {
+			if seen[cve] {
+				continue
+			}
+			seen[cve] = true
+			evidence := boundedEvidence(trimmed)
+			if cpe != "" && !strings.Contains(evidence, cpe) {
+				evidence = boundedEvidence(cpe + " " + evidence)
+			}
+			score := vulnersScore(line, cve)
+			vulns = append(vulns, sirius.Vulnerability{
+				VID:         cve,
+				Title:       cve, // Just use the CVE ID as the title
+				Description: evidence,
+				CVEID:       cve,
+				CVSSScore:   score,
+				RiskScore:   score,
+			})
+		}
+	}
+	// CVEs mentioned outside a scannable line (e.g. wrapped output) still
+	// become findings with bounded evidence.
+	for _, cve := range extractCVEsFromText(result.Output) {
+		if seen[cve] {
+			continue
+		}
+		seen[cve] = true
 		vulns = append(vulns, sirius.Vulnerability{
 			VID:         cve,
-			Title:       cve, // Just use the CVE ID as the title
-			Description: description,
-			RiskScore:   5.0, // Default medium severity
+			Title:       cve,
+			Description: evidenceFor(result.Output, cve),
+			CVEID:       cve,
 		})
 	}
-
 	return vulns
 }
 

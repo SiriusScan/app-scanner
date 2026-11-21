@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/SiriusScan/app-scanner/modules/naabu"
 	"github.com/SiriusScan/app-scanner/modules/nmap"
-	"github.com/SiriusScan/go-api/nvd"
 	"github.com/SiriusScan/go-api/sirius"
 )
 
@@ -83,109 +81,34 @@ func (n *NmapStrategy) executeWithContext(ctx context.Context, target string, sc
 		return results, fmt.Errorf("scan cancelled: %w", ctx.Err())
 	}
 
-	// NVD is optional metadata: bound the entire enrichment phase, not just
-	// each CVE, and retain findings if its budget runs out.
-	results.Vulnerabilities, err = enrichVulnerabilities(ctx, results.Vulnerabilities, nvdEnrichmentTimeout)
-	if err != nil {
-		return results, fmt.Errorf("scan cancelled during enrichment: %w", err)
-	}
+	// Findings are scanner evidence as reported by the tools (vulners
+	// carries its own CVSS scores). No external enrichment happens on the
+	// scan path: it cannot delay or drop persistence, and unknown scores
+	// stay unknown instead of being fabricated.
+	results.Vulnerabilities = normalizeVulnerabilities(results.Vulnerabilities)
 
 	slog.Info("vulnerability scan complete", "target", target, "vuln_count", len(results.Vulnerabilities))
 	return results, nil
 }
 
-const nvdEnrichmentTimeout = 30 * time.Second
-
-func enrichVulnerabilities(ctx context.Context, vulns []sirius.Vulnerability, timeout time.Duration) ([]sirius.Vulnerability, error) {
-	enrichmentCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	expanded := append([]sirius.Vulnerability{}, vulns...)
-	for i, vuln := range vulns {
-		if err := ctx.Err(); err != nil {
-			return expanded, err
+// normalizeVulnerabilities trims IDs and fills identity fields only. It
+// never invents a description or score the scanner did not report.
+func normalizeVulnerabilities(vulns []sirius.Vulnerability) []sirius.Vulnerability {
+	normalized := append([]sirius.Vulnerability{}, vulns...)
+	for i, vuln := range normalized {
+		vuln.VID = strings.TrimSpace(vuln.VID)
+		if vuln.Title == "" {
+			vuln.Title = vuln.VID
 		}
-		if enrichmentCtx.Err() != nil {
-			slog.Warn("NVD enrichment budget exhausted", "remaining", len(vulns)-i)
-			break
+		if vuln.CVEID == "" && strings.HasPrefix(vuln.VID, "CVE-") {
+			vuln.CVEID = vuln.VID
 		}
-		expanded[i] = expandVulnerabilityWithContext(enrichmentCtx, vuln)
-	}
-	return expanded, ctx.Err()
-}
-
-// expandVulnerability supplements vulnerability details with NVD info.
-func expandVulnerability(vuln sirius.Vulnerability) sirius.Vulnerability {
-	return expandVulnerabilityWithContext(context.Background(), vuln)
-}
-
-func expandVulnerabilityWithContext(ctx context.Context, vuln sirius.Vulnerability) sirius.Vulnerability {
-	trimmed := strings.TrimSpace(vuln.VID)
-	if !strings.HasPrefix(trimmed, "CVE-") {
-		// Ensure the ID is properly formatted
-		trimmed = "CVE-" + trimmed
-	}
-
-	// Ensure vuln.VID matches the properly formatted CVE ID for consistency
-	vuln.VID = trimmed
-
-	// Set a meaningful title if it's missing
-	if vuln.Title == "" || vuln.Title == vuln.VID {
-		vuln.Title = trimmed
-	}
-
-	// Try to get details from NVD API
-	cveDetails, err := nvd.GetCVEContext(ctx, trimmed)
-	if err != nil {
-		// Log error but continue with basic vuln info
-		slog.Error("failed to get CVE details", "cve", trimmed, "error", err)
-
-		// Set minimal details for the vulnerability
-		if vuln.Description == "" {
-			vuln.Description = fmt.Sprintf("No description available for %s. Detected during scan.", trimmed)
+		if vuln.CVSSScore == 0 && vuln.RiskScore > 0 {
+			vuln.CVSSScore = vuln.RiskScore
 		}
-
-		// Set a default risk score if none is available
-		if vuln.RiskScore <= 0 {
-			vuln.RiskScore = 5.0 // Medium risk as default
-		}
-
-		return vuln
+		normalized[i] = vuln
 	}
-
-	// If we have details, update the vulnerability with them
-	if len(cveDetails.Descriptions) > 0 {
-		for _, desc := range cveDetails.Descriptions {
-			// Prefer English description
-			if desc.Lang == "en" {
-				vuln.Description = desc.Value
-				break
-			}
-		}
-
-		// If no English description was found, use the first one
-		if vuln.Description == "" && len(cveDetails.Descriptions) > 0 {
-			vuln.Description = cveDetails.Descriptions[0].Value
-		}
-	}
-
-	// If still no description, set a default
-	if vuln.Description == "" {
-		vuln.Description = fmt.Sprintf("No description available for %s. Detected during scan.", trimmed)
-	}
-
-	// Set the risk score from the CVSS data if available
-	if len(cveDetails.Metrics.CvssMetricV31) > 0 {
-		vuln.RiskScore = cveDetails.Metrics.CvssMetricV31[0].CvssData.BaseScore
-	} else if len(cveDetails.Metrics.CvssMetricV30) > 0 {
-		vuln.RiskScore = cveDetails.Metrics.CvssMetricV30[0].CvssData.BaseScore
-	} else if len(cveDetails.Metrics.CvssMetricV2) > 0 {
-		vuln.RiskScore = cveDetails.Metrics.CvssMetricV2[0].CvssData.BaseScore
-	} else if vuln.RiskScore <= 0 {
-		// Keep a scanner-provided score when NVD has no metrics.
-		vuln.RiskScore = 5.0 // Medium risk as default
-	}
-
-	return vuln
+	return normalized
 }
 
 // NaabuStrategy implements port enumeration using Naabu

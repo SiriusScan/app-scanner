@@ -404,9 +404,9 @@ func (sm *ScanManager) handleMessage(msg string) {
 	var run *ScanManager
 	err = nil
 	if scanMsg.StateMode == "keyed" {
-		run, err = sm.newKeyedRunForSubject(scanMsg.ID, scanMsg.ResourceScope.OwnerSubjectID)
+		run, err = sm.newKeyedRunForSubjectWithTargets(scanMsg.ID, scanMsg.ResourceScope.OwnerSubjectID, scanMsg.Targets)
 	} else {
-		run, err = sm.newScanRun(scanMsg.ID)
+		run, err = sm.newScanRunWithTargets(scanMsg.ID, scanMsg.Targets)
 	}
 	if err != nil {
 		slog.Warn("Ignoring scan request", "scan_id", scanMsg.ID, "error", err)
@@ -961,7 +961,7 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 				ID:          vuln.VID,
 				Severity:    severity,
 				Title:       vuln.Title,
-				Description: vuln.Description,
+				Description: truncateForSummary(vuln.Description),
 				RiskScore:   vuln.RiskScore,
 				ScanSource:  "network",
 				HostID:      vulnResults.IP,
