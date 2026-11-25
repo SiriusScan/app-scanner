@@ -8,14 +8,8 @@ github.com/Mzack9999/gcache v0.0.0-20230410081825-519e28eab057/go.mod h1:iLB2piv
 github.com/Mzack9999/go-http-digest-auth-client v0.6.1-0.20220414142836-eb8883508809 h1:ZbFL+BDfBqegi+/Ssh7im5+aQfBRx6it+kHnC7jaDU8=
 github.com/Mzack9999/go-http-digest-auth-client v0.6.1-0.20220414142836-eb8883508809/go.mod h1:upgc3Zs45jBDnBT4tVRgRcgm26ABpaP7MoTSdgysca4=
 github.com/ProtonMail/go-crypto v0.0.0-20230217124315-7d5c6f04bbb8/go.mod h1:I0gYDMZ6Z5GRU7l58bNFSkPTFN6Yl12dsUlAZ8xy98g=
-github.com/SiriusScan/go-api v0.0.19-0.20261108104525-3299d88469f0 h1:2fWkQY16pJrSkh7DUOkdA4+g0FGLbuEwrPTASY+Ups8=
-github.com/SiriusScan/go-api v0.0.19-0.20261108104525-3299d88469f0/go.mod h1:OnL5Cp7xjpa0NdaZ5jbG9NKfln2V6gihRaqKJjOKAxw=
-github.com/SiriusScan/go-api v0.0.24 h1:JQPNV76RLZDS3bhLlfhKp+3vi2xMs5EtkOE2Lg+DXAQ=
-github.com/SiriusScan/go-api v0.0.24/go.mod h1:OnL5Cp7xjpa0NdaZ5jbG9NKfln2V6gihRaqKJjOKAxw=
-github.com/SiriusScan/go-api v0.0.25 h1:FhKAXx+R3e9bNjouwH0C1++JR5llKZYb/RW8/dfg8bk=
-github.com/SiriusScan/go-api v0.0.25/go.mod h1:OnL5Cp7xjpa0NdaZ5jbG9NKfln2V6gihRaqKJjOKAxw=
-github.com/SiriusScan/go-api v0.0.26 h1:UEw5cR8iJGGwfbuT82keSG3Id86knCrD0cW0PIYTwsI=
-github.com/SiriusScan/go-api v0.0.26/go.mod h1:PsWy9dXy6m+bgJMG+b7u9N+4OS0EsJS4pqnTdzHbV+Q=
+github.com/SiriusScan/go-api v0.0.35 h1:icjodwFRIv1Cv8Fv2z9G0Qe2vFXGgpemXi7sOR9a0Gk=
+github.com/SiriusScan/go-api v0.0.35/go.mod h1:PsWy9dXy6m+bgJMG+b7u9N+4OS0EsJS4pqnTdzHbV+Q=
 github.com/SiriusScan/pingpp v0.0.0-20261125012228-a6e4289ccaf4 h1:llYBnZvdXtQ+uoesr0GMeDCAxiUQlvg9uqSfZGEJS8c=
 github.com/SiriusScan/pingpp v0.0.0-20261125012228-a6e4289ccaf4/go.mod h1:NA0V/VAj1PVerQ6HigAHPcd5r2TLKhHAwNBMlx8re/4=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=
@@ -272,6 +266,8 @@ github.com/rogpeppe/go-internal v1.10.0 h1:TMyTOH3F/DB16zRVcYyreMH6GnZZrwQVAoYjR
 github.com/rogpeppe/go-internal v1.10.0/go.mod h1:UQnix2H7Ngw/k4C5ijL5+65zddjncjaFoBhdsK/akog=
 github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d h1:hrujxIzL1woJ7AwssoOcM/tq5JjjG2yYOc8odClEiXA=
 github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d/go.mod h1:uugorj2VCxiV1x+LzaIdVa9b4S4qGAcH6cbhh4qVxOU=
+github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 h1:lZUw3E0/J3roVtGQ+SCrUrg3ON6NgVqpn3+iol9aGu4=
+github.com/santhosh-tekuri/jsonschema/v5 v5.3.1/go.mod h1:uToXkOrWAZ6/Oc07xWQrPOhJotwFIyu2bBVN41fcDUY=
 github.com/shirou/gopsutil/v3 v3.23.7 h1:C+fHO8hfIppoJ1WdsVm1RoI0RwXoNdfTK7yWXV0wVj4=
 github.com/shirou/gopsutil/v3 v3.23.7/go.mod h1:c4gnmoRC0hQuaLqvxnx1//VXQ0Ms/X9UnJF8pddY5z4=
 github.com/shoenig/go-m1cpu v0.1.6 h1:nxdKQNcEB6vzgA2E2bvzKIYRuNj7XNJ4S/aRSwKzFtM=

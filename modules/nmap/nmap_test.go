@@ -189,6 +189,57 @@ func TestExtractVulnersVulnerabilitiesEvidenceAndScore(t *testing.T) {
 	assert.Equal(t, 0.0, byID["CVE-2021-99999"].RiskScore)
 }
 
+func TestProcessNmapOutputAttachesPortAndServiceMetadata(t *testing.T) {
+	xmlOutput := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun>
+  <host>
+    <address addr="192.168.123.14" addrtype="ipv4"/>
+    <ports>
+      <port protocol="tcp" portid="8080">
+        <state state="open"/>
+        <service name="http" product="Apache Tomcat" version="8.5.19"/>
+        <script id="vulners" output="
+  cpe:/a:apache:tomcat:8.5.19:
+    CVE-2020-1938  9.8  https://vulners.com/cve/CVE-2020-1938
+        "/>
+      </port>
+      <port protocol="tcp" portid="22">
+        <state state="open"/>
+        <service name="ssh" product="OpenSSH" version="10.0p2"/>
+        <script id="vulners" output="
+  cpe:/a:openbsd:openssh:10.0p2:
+    CVE-2026-60002  9.4  https://vulners.com/cve/CVE-2026-60002
+        "/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>`
+
+	host, err := processNmapOutput(xmlOutput)
+	require.NoError(t, err)
+	require.Len(t, host.Vulnerabilities, 2)
+
+	byID := make(map[string]sirius.Vulnerability)
+	for _, v := range host.Vulnerabilities {
+		byID[v.VID] = v
+	}
+
+	tomcat := byID["CVE-2020-1938"]
+	require.NotNil(t, tomcat.Metadata)
+	assert.Equal(t, 8080, tomcat.Metadata["port"])
+	assert.Equal(t, "tcp", tomcat.Metadata["protocol"])
+	assert.Equal(t, "http", tomcat.Metadata["service"])
+	assert.Equal(t, "http (Apache Tomcat 8.5.19)", tomcat.Metadata["service_info"])
+
+	ssh := byID["CVE-2026-60002"]
+	require.NotNil(t, ssh.Metadata)
+	assert.Equal(t, 22, ssh.Metadata["port"])
+	assert.Equal(t, "tcp", ssh.Metadata["protocol"])
+	assert.Equal(t, "ssh", ssh.Metadata["service"])
+	assert.Equal(t, "ssh (OpenSSH 10.0p2)", ssh.Metadata["service_info"])
+}
+
 func TestDeduplicateVulnerabilities(t *testing.T) {
 	vulns := []sirius.Vulnerability{
 		{VID: "CVE-2021-1234", Title: "First"},

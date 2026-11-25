@@ -330,11 +330,13 @@ func processNmapOutput(output string) (sirius.Host, error) {
 		}
 
 		// Process script outputs for the port
+		portServiceInfo := formatNmapServiceInfo(port.Service)
 		for _, script := range port.Scripts {
 			result := parseScriptOutput(script)
 
 			// Handle vulnerability information from scripts
 			if vulns := extractVulnerabilities(result); len(vulns) > 0 {
+				attachPortServiceMetadata(vulns, port.PortId, port.Protocol, port.Service.Name, portServiceInfo)
 				host.Vulnerabilities = append(host.Vulnerabilities, vulns...)
 			}
 		}
@@ -517,6 +519,54 @@ func severityForScore(score float64) string {
 		return "low"
 	default:
 		return "informational"
+	}
+}
+
+func formatNmapServiceInfo(svc nmap.Service) string {
+	name := strings.TrimSpace(svc.Name)
+	product := strings.TrimSpace(svc.Product)
+	version := strings.TrimSpace(svc.Version)
+	detail := strings.TrimSpace(strings.Join([]string{product, version}, " "))
+	switch {
+	case name != "" && detail != "":
+		return fmt.Sprintf("%s (%s)", name, detail)
+	case detail != "":
+		return detail
+	default:
+		return name
+	}
+}
+
+func attachPortServiceMetadata(vulns []sirius.Vulnerability, port int, protocol, serviceName, serviceInfo string) {
+	protocol = strings.TrimSpace(strings.ToLower(protocol))
+	serviceName = strings.TrimSpace(serviceName)
+	serviceInfo = strings.TrimSpace(serviceInfo)
+	for i := range vulns {
+		if vulns[i].Metadata == nil {
+			vulns[i].Metadata = map[string]interface{}{}
+		}
+		if port > 0 && port <= 65535 {
+			vulns[i].Metadata["port"] = port
+		}
+		if protocol != "" {
+			vulns[i].Metadata["protocol"] = protocol
+		}
+		if serviceName != "" {
+			vulns[i].Metadata["service"] = serviceName
+		}
+		resolvedInfo := serviceInfo
+		if cpe, ok := vulns[i].Metadata["cpe"].(string); ok {
+			if cpeLabel := formatCPELabel(cpe); cpeLabel != "" {
+				if resolvedInfo == "" {
+					resolvedInfo = cpeLabel
+				} else if resolvedInfo == serviceName {
+					resolvedInfo = fmt.Sprintf("%s (%s)", serviceName, cpeLabel)
+				}
+			}
+		}
+		if resolvedInfo != "" {
+			vulns[i].Metadata["service_info"] = resolvedInfo
+		}
 	}
 }
 

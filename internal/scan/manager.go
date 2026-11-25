@@ -924,6 +924,7 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 		scan.Hosts, _ = mergeHost(scan.Hosts, vulnResults.IP, vulnResults.Hostname, "network")
 		for _, vuln := range vulnResults.Vulnerabilities {
 			severity := calculateSeverity(vuln.RiskScore)
+			port, protocol, serviceInfo := extractVulnPortService(vuln.Metadata)
 			scan.Vulnerabilities = append(scan.Vulnerabilities, store.VulnerabilitySummary{
 				ID:          vuln.VID,
 				Severity:    severity,
@@ -932,6 +933,9 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 				RiskScore:   vuln.RiskScore,
 				ScanSource:  "network",
 				HostID:      vulnResults.IP,
+				Port:        port,
+				Protocol:    protocol,
+				ServiceInfo: serviceInfo,
 			})
 		}
 		return nil
@@ -1192,4 +1196,28 @@ func decodeBase64(s string) ([]byte, error) {
 // encodeBase64 encodes bytes to base64 string
 func encodeBase64(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+func extractVulnPortService(meta map[string]interface{}) (int, string, string) {
+	if len(meta) == 0 {
+		return 0, "", ""
+	}
+	var port int
+	switch v := meta["port"].(type) {
+	case int:
+		port = v
+	case int64:
+		port = int(v)
+	case float64:
+		port = int(v)
+	}
+	if port < 0 || port > 65535 {
+		port = 0
+	}
+	protocol, _ := meta["protocol"].(string)
+	serviceInfo, _ := meta["service_info"].(string)
+	if strings.TrimSpace(serviceInfo) == "" {
+		serviceInfo, _ = meta["service"].(string)
+	}
+	return port, strings.TrimSpace(protocol), strings.TrimSpace(serviceInfo)
 }

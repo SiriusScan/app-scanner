@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.1
 
 require (
-	github.com/SiriusScan/go-api v0.0.26
+	github.com/SiriusScan/go-api v0.0.35
 	github.com/SiriusScan/pingpp v0.0.0-20261125012228-a6e4289ccaf4
 	github.com/lair-framework/go-nmap v0.0.0-20191202052157-3507e0b03523
 	github.com/projectdiscovery/goflags v0.1.68
