@@ -54,16 +54,19 @@ func fixtureInventorySummary(t *testing.T, scan store.ScanResult) inventoryRepor
 func TestInventoryReportAcknowledgements(t *testing.T) {
 	t.Setenv("SIRIUS_API_KEY_FILE", "")
 	t.Setenv("SIRIUS_API_KEY", "fixture-key")
-	const accepted = `{"message":"saved","host_ip":"192.0.2.1","source":"fixture"}`
+	const accepted = `{"message":"Host added successfully with source attribution","host_ip":"192.0.2.1","source":"fixture"}`
 	for _, fixture := range []struct {
 		name, body string
 		status     int
 		outcome    inventoryReportOutcome
 	}{
 		{"acknowledged Community report", accepted, http.StatusOK, inventoryReportAccepted},
+		{"acknowledged enhanced report", strings.ReplaceAll(accepted, "with source attribution", "with enhanced SBOM data"), http.StatusOK, inventoryReportAccepted},
+		{"failure with matching host and source", strings.ReplaceAll(accepted, "Host added successfully with source attribution", "validation failed"), http.StatusOK, inventoryReportHTTPUnconfirmed},
+		{"denied success flag", accepted[:len(accepted)-1] + `,"success":false}`, http.StatusOK, inventoryReportHTTPUnconfirmed},
 		{"different host", strings.ReplaceAll(accepted, "192.0.2.1", "192.0.2.2"), http.StatusOK, inventoryReportHTTPUnconfirmed},
 		{"truncated response", accepted[:len(accepted)-1], http.StatusOK, inventoryReportHTTPUnconfirmed},
-		{"error envelope", `{"message":"saved","host_ip":"192.0.2.1","source":"fixture","error":"inert"}`, http.StatusOK, inventoryReportHTTPUnconfirmed},
+		{"error envelope", `{"message":"Host added successfully with source attribution","host_ip":"192.0.2.1","source":"fixture","error":"inert"}`, http.StatusOK, inventoryReportHTTPUnconfirmed},
 		{"pending response", accepted, http.StatusAccepted, inventoryReportHTTPUnconfirmed},
 		{"unexpected no content", "", http.StatusNoContent, inventoryReportHTTPUnconfirmed},
 		{"rejection", "private fixture error", http.StatusForbidden, inventoryReportHTTPRejected},

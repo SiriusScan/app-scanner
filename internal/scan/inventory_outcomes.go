@@ -93,6 +93,7 @@ func inventoryResponseOutcome(request *http.Request, response *http.Response, ho
 		HostIP  string          `json:"host_ip"`
 		Source  string          `json:"source"`
 		Error   json.RawMessage `json:"error"`
+		Success *bool           `json:"success"`
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, inventoryResponseLimit+1))
 	if err != nil {
@@ -100,11 +101,16 @@ func inventoryResponseOutcome(request *http.Request, response *http.Response, ho
 	}
 	if len(body) > inventoryResponseLimit ||
 		json.Unmarshal(body, &acknowledgement) != nil ||
-		acknowledgement.Message == "" || acknowledgement.HostIP != hostIP ||
-		acknowledgement.Source != source || len(acknowledgement.Error) != 0 {
+		acknowledgement.HostIP != hostIP || acknowledgement.Source != source ||
+		len(acknowledgement.Error) != 0 || (acknowledgement.Success != nil && !*acknowledgement.Success) {
 		return inventoryReportHTTPUnconfirmed
 	}
-	return inventoryReportAccepted
+	switch acknowledgement.Message {
+	case "Host added successfully with source attribution", "Host added successfully with enhanced SBOM data":
+		return inventoryReportAccepted
+	default:
+		return inventoryReportHTTPUnconfirmed
+	}
 }
 
 // projectInventoryReports runs inside the same retryable CAS modifier as
