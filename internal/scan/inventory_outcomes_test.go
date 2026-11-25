@@ -70,6 +70,8 @@ func TestInventoryReportAcknowledgements(t *testing.T) {
 		{"pending response", accepted, http.StatusAccepted, inventoryReportHTTPUnconfirmed},
 		{"unexpected no content", "", http.StatusNoContent, inventoryReportHTTPUnconfirmed},
 		{"rejection", "private fixture error", http.StatusForbidden, inventoryReportHTTPRejected},
+		{"unrecognized conflict", "", http.StatusConflict, inventoryReportHTTPUnconfirmed},
+		{"unrecognized throttling", "", http.StatusTooManyRequests, inventoryReportHTTPUnconfirmed},
 		{"server error", "private fixture error", http.StatusInternalServerError, inventoryReportHTTPUnconfirmed},
 		{"request timeout", "", http.StatusRequestTimeout, inventoryReportTimeout},
 	} {
@@ -139,7 +141,7 @@ func TestInventoryReportRejectionKeepsLiveFindingAndProcessingCompletion(t *test
 	sm.apiHTTPClient = inventoryFixtureClient(http.StatusForbidden, "private fixture error")
 	host := sirius.Host{IP: "192.0.2.1", Vulnerabilities: []sirius.Vulnerability{{VID: "fixture-finding", Title: "Fixture"}}}
 	var tally inventoryReportTally
-	if err := sm.recordVulnerabilityResults(host, "fixture", &tally); err != nil {
+	if err := sm.recordVulnerabilityResults(host.IP, host, "fixture", &tally); err != nil {
 		t.Fatal(err)
 	}
 	if err := sm.markHostComplete(host.IP, tally); err != nil {
@@ -225,4 +227,35 @@ func TestInventoryReportProjectionDoesNotFinalizeUnknownCoverage(t *testing.T) {
 			t.Fatalf("uncommitted outcome was presented as complete: %+v / %+v / %v", scan, summary, err)
 		}
 	})
+}
+
+func TestInventoryReportReadmissionPreservesUnavailableMetadata(t *testing.T) {
+	const valid = `{"version":1,"attempted":0,"accepted":0,"rejected":0,"unknown":0,"finalized":false}`
+	for _, fixture := range []struct{ name, prior string }{
+		{"missing version", strings.Replace(valid, `"version":1,`, "", 1)},
+		{"missing count", strings.Replace(valid, `"accepted":0,`, "", 1)},
+		{"null count", strings.Replace(valid, `"rejected":0`, `"rejected":null`, 1)},
+		{"missing finalized", strings.Replace(valid, `,"finalized":false`, "", 1)},
+		{"null finalized", strings.Replace(valid, `"finalized":false`, `"finalized":null`, 1)},
+		{"null interrupted", valid[:len(valid)-1] + `,"interrupted":null}`},
+		{"contradictory coverage", strings.Replace(valid, `"finalized":false`, `"finalized":true,"interrupted":true`, 1)},
+		{"null reasons", valid[:len(valid)-1] + `,"reasons":null}`},
+		{"null reason count", valid[:len(valid)-1] + `,"reasons":{"timeout":null}}`},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			initial := activeTestScan("scan-a", 1)
+			network := initial.SubScans["network"]
+			network.Metadata = json.RawMessage(`{"inventory_reports":` + fixture.prior + `}`)
+			initial.SubScans["network"] = network
+			sm, kv, _ := testManager(t, initial)
+			sm.scheduleTargets([]string{"192.0.2.1"})
+			if err := sm.markHostComplete("192.0.2.1", inventoryReportTally{inventoryReportAccepted: 1}); err != nil {
+				t.Fatal(err)
+			}
+			scan := readTestScan(t, kv)
+			if scan.Status != "completed" || string(scan.SubScans["network"].Metadata) != string(network.Metadata) {
+				t.Fatalf("processing or original unavailable metadata changed: %+v / %s", scan, scan.SubScans["network"].Metadata)
+			}
+		})
+	}
 }

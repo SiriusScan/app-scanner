@@ -76,7 +76,8 @@ func inventoryResponseOutcome(request *http.Request, response *http.Response, ho
 	if response.StatusCode == http.StatusRequestTimeout {
 		return inventoryReportTimeout
 	}
-	if response.StatusCode >= 400 && response.StatusCode < 500 {
+	switch response.StatusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestEntityTooLarge:
 		return inventoryReportHTTPRejected
 	}
 	if scoped && response.StatusCode == http.StatusNoContent {
@@ -124,8 +125,8 @@ func projectInventoryReports(subScan *store.SubScan, tally inventoryReportTally,
 
 	summary := inventoryReportSummary{Version: inventoryReportVersion}
 	if previous, exists := metadata[inventoryReportMetadataKey]; exists {
-		var prior inventoryReportSummary
-		if json.Unmarshal(previous, &prior) != nil || !prior.valid() {
+		prior, valid := decodeInventoryReportSummary(previous)
+		if !valid {
 			return
 		}
 		summary = prior
@@ -177,8 +178,45 @@ func projectInventoryReports(subScan *store.SubScan, tally inventoryReportTally,
 	}
 }
 
+func decodeInventoryReportSummary(raw json.RawMessage) (inventoryReportSummary, bool) {
+	var summary inventoryReportSummary
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return summary, false
+	}
+	for _, key := range []string{"version", "attempted", "accepted", "rejected", "unknown", "finalized"} {
+		if value := fields[key]; len(value) == 0 || string(value) == "null" {
+			return summary, false
+		}
+	}
+	if string(fields["interrupted"]) == "null" {
+		return summary, false
+	}
+	if rawReasons, ok := fields["reasons"]; ok {
+		var reasons map[string]json.RawMessage
+		if json.Unmarshal(rawReasons, &reasons) != nil || reasons == nil {
+			return summary, false
+		}
+		for name, value := range reasons {
+			switch name {
+			case "local_error", "http_rejected", "timeout", "transport_error", "http_unconfirmed":
+				if string(value) == "null" {
+					return summary, false
+				}
+			default:
+				return summary, false
+			}
+		}
+	}
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		return summary, false
+	}
+	return summary, summary.valid()
+}
+
 func (summary inventoryReportSummary) valid() bool {
 	if summary.Version != inventoryReportVersion ||
+		(summary.Interrupted && summary.Finalized) ||
 		summary.Attempted > maxInventoryReportCount ||
 		summary.Accepted > summary.Attempted ||
 		summary.Rejected > summary.Attempted ||

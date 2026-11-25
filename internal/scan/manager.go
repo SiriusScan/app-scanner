@@ -908,10 +908,10 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 	}
 	sm.logger.LogVulnerabilityScan(sm.currentScanID, ip, vulnerabilities, "nmap")
 
-	return sm.recordVulnerabilityResults(vulnResults, "nmap", reports)
+	return sm.recordVulnerabilityResults(ip, vulnResults, "nmap", reports)
 }
 
-func (sm *ScanManager) recordVulnerabilityResults(vulnResults sirius.Host, toolName string, reports *inventoryReportTally) error {
+func (sm *ScanManager) recordVulnerabilityResults(ip string, vulnResults sirius.Host, toolName string, reports *inventoryReportTally) error {
 
 	// Submit host data using the new source-aware API. If submission fails
 	// we degrade gracefully and continue the rest of the scan; the KV-store
