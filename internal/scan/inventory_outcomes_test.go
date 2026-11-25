@@ -74,7 +74,8 @@ func TestInventoryReportAcknowledgements(t *testing.T) {
 			sm := &ScanManager{ctx: context.Background(), apiBaseURL: "http://inventory.invalid", apiHTTPClient: inventoryFixtureClient(fixture.status, fixture.body)}
 			var tally inventoryReportTally
 			err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture", &tally)
-			want := inventoryReportTally{fixture.outcome: 1}
+			var want inventoryReportTally
+			want[fixture.outcome] = 1
 			if tally != want || (err == nil) != (fixture.status >= 200 && fixture.status < 300) {
 				t.Fatalf("tally=%v, want=%v, submission error=%v", tally, want, err)
 			}
@@ -94,7 +95,9 @@ func TestInventoryReportAcknowledgements(t *testing.T) {
 			})}
 			sm := &ScanManager{ctx: context.Background(), apiBaseURL: "http://inventory.invalid", apiHTTPClient: client}
 			var tally inventoryReportTally
-			if err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture", &tally); err == nil || tally != (inventoryReportTally{fixture.want: 1}) {
+			var want inventoryReportTally
+			want[fixture.want] = 1
+			if err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture", &tally); err == nil || tally != want {
 				t.Fatalf("tally=%v, submission error=%v", tally, err)
 			}
 		})
