@@ -312,19 +312,32 @@ func processNmapOutput(output string) (sirius.Host, error) {
 	var ports []sirius.Port
 	var services []sirius.Service
 	for _, port := range nmapHost.Ports {
+		serviceName := strings.TrimSpace(port.Service.Name)
+		serviceProduct := strings.TrimSpace(port.Service.Product)
+		serviceVersion := strings.TrimSpace(port.Service.Version)
+		serviceExtraInfo := strings.TrimSpace(port.Service.ExtraInfo)
+
 		p := sirius.Port{
-			Number:   port.PortId,
-			Protocol: port.Protocol,
-			State:    port.State.State,
+			Number:           port.PortId,
+			Protocol:         port.Protocol,
+			State:            port.State.State,
+			ServiceName:      serviceName,
+			ServiceProduct:   serviceProduct,
+			ServiceVersion:   serviceVersion,
+			ServiceExtraInfo: serviceExtraInfo,
 		}
 		ports = append(ports, p)
 
 		// Extract service information
-		if port.Service.Name != "" {
+		if serviceName != "" || serviceProduct != "" {
+			prod := serviceProduct
+			if prod == "" {
+				prod = serviceName
+			}
 			service := sirius.Service{
 				Port:    port.PortId,
-				Product: port.Service.Name,
-				Version: port.Service.Version,
+				Product: prod,
+				Version: serviceVersion,
 			}
 			services = append(services, service)
 		}
