@@ -131,7 +131,7 @@ func TestLifecycleLateWorkerCannotChangeReplacement(t *testing.T) {
 	sm, kv, logger := testManager(t, activeTestScan("scan-new", 1))
 	sm.currentScanID = "scan-old"
 	before, _ := kv.GetValue(sm.ctx, "currentScan")
-	if err := sm.markHostComplete("192.0.2.1"); !errors.Is(err, ErrScanMismatch) {
+	if err := sm.markHostComplete("192.0.2.1", inventoryReportTally{}); !errors.Is(err, ErrScanMismatch) {
 		t.Fatalf("got %v", err)
 	}
 	sm.updateScanStatus("failed")
@@ -146,7 +146,7 @@ func TestLifecycleCompletionAggregatesSubscanOutcomes(t *testing.T) {
 			scan := activeTestScan("scan-a", 1)
 			scan.SubScans["agent"] = store.SubScan{Enabled: true, Status: other}
 			sm, kv, logger := testManager(t, scan)
-			if err := sm.markHostComplete("192.0.2.1"); err != nil {
+			if err := sm.markHostComplete("192.0.2.1", inventoryReportTally{}); err != nil {
 				t.Fatal(err)
 			}
 			got := readTestScan(t, kv)
@@ -168,17 +168,17 @@ func TestLifecycleCompletionAggregatesSubscanOutcomes(t *testing.T) {
 }
 func TestLifecycleWaitsForFullTargetSetAndDoesNotDoubleComplete(t *testing.T) {
 	sm, kv, logger := testManager(t, activeTestScan("scan-a", 2))
-	if err := sm.markHostComplete("192.0.2.1"); err != nil {
+	if err := sm.markHostComplete("192.0.2.1", inventoryReportTally{}); err != nil {
 		t.Fatal(err)
 	}
 	if readTestScan(t, kv).Status != "running" {
 		t.Fatal("premature completion")
 	}
-	if err := sm.markHostComplete("192.0.2.2"); err != nil {
+	if err := sm.markHostComplete("192.0.2.2", inventoryReportTally{}); err != nil {
 		t.Fatal(err)
 	}
 	final := readTestScan(t, kv)
-	if err := sm.markHostComplete("192.0.2.2"); err != nil {
+	if err := sm.markHostComplete("192.0.2.2", inventoryReportTally{}); err != nil {
 		t.Fatal(err)
 	}
 	got := readTestScan(t, kv)
@@ -323,7 +323,7 @@ func TestLifecycleCASRevalidatesReplacementAndCancellation(t *testing.T) {
 				kv.SetValue(sm.ctx, "currentScan", encodeTestScan(t, scan))
 			}
 			sm.scanUpdater = NewScanUpdater(conflict)
-			err := sm.markHostComplete("192.0.2.1")
+			err := sm.markHostComplete("192.0.2.1", inventoryReportTally{inventoryReportAccepted: 1})
 			got := readTestScan(t, kv)
 			if change == "replacement" {
 				if !errors.Is(err, ErrScanMismatch) || got.ID != "scan-b" || got.HostsCompleted != 0 {
@@ -337,6 +337,9 @@ func TestLifecycleCASRevalidatesReplacementAndCancellation(t *testing.T) {
 			}
 			if change == "progress" && (got.Status != "running" || got.SubScans["agent"].Status != "running" || got.HostsCompleted != 1) {
 				t.Fatal("lost concurrent progress")
+			}
+			if change != "progress" && len(got.SubScans["network"].Metadata) != 0 {
+				t.Fatal("late report accounting changed a cancelled or replacement scan")
 			}
 			if len(logger.completed) != 0 {
 				t.Fatal("success logged before successful CAS")

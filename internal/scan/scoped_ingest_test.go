@@ -23,7 +23,7 @@ func TestScopedHostUsesExplicitEndpointAndSubject(t *testing.T) {
 	}))
 	defer srv.Close()
 	sm := &ScanManager{ctx: context.Background(), apiBaseURL: "http://127.0.0.1:1", scopedIngestURL: srv.URL + "/trusted", subjectID: "alice", apiHTTPClient: srv.Client()}
-	if err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture"); err != nil {
+	if err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture", &inventoryReportTally{}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -46,14 +46,15 @@ func TestScopedHostFailureMarksScanFailed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sm := &ScanManager{ctx: ctx, cancel: cancel, currentScanID: "a", subjectID: "alice", scopedIngestURL: srv.URL, apiHTTPClient: srv.Client(), scanUpdater: &ScanUpdater{kvStore: kv, keyed: true, subjectID: "alice"}}
-	if err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture"); err == nil {
+	if err := sm.submitHostWithSource(sirius.Host{IP: "192.0.2.1"}, "fixture", &inventoryReportTally{}); err == nil {
 		t.Fatal("expected scoped ingest failure")
 	}
-	var status string
-	if err := sm.scanUpdater.UpdateForScan(context.Background(), "a", func(s *store.ScanResult) error { status = s.Status; return nil }); err != nil {
+	var persisted store.ScanResult
+	if err := sm.scanUpdater.UpdateForScan(context.Background(), "a", func(s *store.ScanResult) error { persisted = *s; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if status != "failed" {
-		t.Fatalf("status=%q", status)
+	summary := fixtureInventorySummary(t, persisted)
+	if persisted.Status != "failed" || summary.Attempted != 1 || summary.Unknown != 1 || summary.Finalized {
+		t.Fatalf("status=%q, inventory=%+v", persisted.Status, summary)
 	}
 }

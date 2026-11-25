@@ -20,7 +20,7 @@ func TestLateWorkerCompletionPreservesUnsuccessfulStatus(t *testing.T) {
 			encoded := base64.StdEncoding.EncodeToString(raw)
 			kv := &fakeKVStore{data: map[string]string{"currentScan": encoded}}
 			sm := &ScanManager{currentScanID: "scan-a", scanUpdater: NewScanUpdater(kv)}
-			if err := sm.markHostComplete("192.0.2.1"); err != nil {
+			if err := sm.markHostComplete("192.0.2.1", inventoryReportTally{}); err != nil {
 				t.Fatal(err)
 			}
 			resp, err := kv.GetValue(context.Background(), "currentScan")
