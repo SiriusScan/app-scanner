@@ -436,3 +436,56 @@ func TestNmapNSEIntegration(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessNmapOutputPersistsServiceOnPortsWithoutFindings(t *testing.T) {
+	xmlOutput := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun>
+  <host>
+    <address addr="192.168.123.14" addrtype="ipv4"/>
+    <ports>
+      <port protocol="tcp" portid="111">
+        <state state="open"/>
+        <service name="rpcbind" product="rpcbind" version="2-4" extrainfo="RPC #100000"/>
+      </port>
+      <port protocol="tcp" portid="3128">
+        <state state="open"/>
+        <service name="http-proxy" product="Squid http proxy" version="5.7"/>
+      </port>
+      <port protocol="tcp" portid="8006">
+        <state state="open"/>
+        <service name="https" product="Proxmox Virtual Environment" tunnel="ssl"/>
+      </port>
+      <port protocol="tcp" portid="8009">
+        <state state="open"/>
+        <service name="ajp13" product="Apache Jserv" extrainfo="Protocol v1.3"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>`
+
+	host, err := processNmapOutput(xmlOutput)
+	require.NoError(t, err)
+	require.Empty(t, host.Vulnerabilities)
+	require.Len(t, host.Ports, 4)
+
+	byPort := make(map[int]sirius.Port, len(host.Ports))
+	for _, p := range host.Ports {
+		byPort[p.Number] = p
+	}
+	assert.Equal(t, "rpcbind", byPort[111].ServiceName)
+	assert.Equal(t, "rpcbind", byPort[111].ServiceProduct)
+	assert.Equal(t, "2-4", byPort[111].ServiceVersion)
+	assert.Equal(t, "RPC #100000", byPort[111].ServiceExtraInfo)
+
+	assert.Equal(t, "http-proxy", byPort[3128].ServiceName)
+	assert.Equal(t, "Squid http proxy", byPort[3128].ServiceProduct)
+	assert.Equal(t, "5.7", byPort[3128].ServiceVersion)
+
+	assert.Equal(t, "https", byPort[8006].ServiceName)
+	assert.Equal(t, "Proxmox Virtual Environment", byPort[8006].ServiceProduct)
+
+	assert.Equal(t, "ajp13", byPort[8009].ServiceName)
+	assert.Equal(t, "Apache Jserv", byPort[8009].ServiceProduct)
+	assert.Equal(t, "Protocol v1.3", byPort[8009].ServiceExtraInfo)
+}
