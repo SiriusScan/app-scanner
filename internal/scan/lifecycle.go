@@ -35,13 +35,14 @@ func cloneScanOptions(options ScanOptions) ScanOptions {
 // executionSnapshot deliberately does not copy mutexes or live coordinator
 // state. A run's ID, options, factory and context never change after scheduling.
 func (sm *ScanManager) executionSnapshot(ctx context.Context, scanID string, options ScanOptions) *ScanManager {
-	options = cloneScanOptions(options)
+	plan := sm.admittedScanPlan
+	plan.currentScanOptions = cloneScanOptions(options)
 	factory := NewScanToolFactory()
-	factory.SetOptions(options)
+	factory.SetOptions(cloneScanOptions(plan.currentScanOptions))
 	return &ScanManager{
-		ctx: ctx, currentScanID: scanID, currentScanOptions: options,
+		ctx: ctx, currentScanID: scanID, admittedScanPlan: plan,
 		toolFactory: factory, workerPool: sm.workerPool,
-		templateManager: sm.templateManager, scanUpdater: sm.scanUpdater,
+		scanUpdater: sm.scanUpdater,
 		kvStore: sm.kvStore, apiBaseURL: sm.apiBaseURL,
 		scopedIngestURL: sm.scopedIngestURL, subjectID: sm.subjectID,
 		apiHTTPClient: sm.apiHTTPClient, logger: sm.logger,
@@ -161,7 +162,7 @@ func (sm *ScanManager) cancelKeyedRun(scanID, subjectID string) {
 }
 
 func (sm *ScanManager) forHostPorts(portList string) *ScanManager {
-	options := cloneScanOptions(sm.currentScanOptions)
+	options := sm.currentScanOptions
 	if portList != "" {
 		options.PortRange = portList
 	}
