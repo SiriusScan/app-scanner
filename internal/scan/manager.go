@@ -263,10 +263,12 @@ func (sm *ScanManager) createScanSource(toolName string) models.ScanSource {
 }
 
 // submitHostWithSource submits host data using the source-aware API endpoint
-func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) (resultErr error) {
+func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string, reports *inventoryReportTally) (resultErr error) {
+	outcome := inventoryReportLocalError
 	defer func() {
+		reports[outcome]++
 		if sm.subjectID != "" && resultErr != nil {
-			sm.updateScanStatus("failed")
+			sm.updateScanStatusWithInventory("failed", *reports)
 		}
 	}()
 	source := sm.createScanSource(toolName)
@@ -310,9 +312,11 @@ func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) (
 
 	resp, err := sm.apiHTTPClient.Do(req)
 	if err != nil {
+		outcome = inventoryTransportOutcome(err)
 		return fmt.Errorf("failed to submit host data to %s: %w", url, err)
 	}
 	defer resp.Body.Close()
+	outcome = inventoryResponseOutcome(req, resp, host.IP, source.Name, sm.subjectID != "")
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -325,7 +329,7 @@ func (sm *ScanManager) submitHostWithSource(host sirius.Host, toolName string) (
 
 // submitFingerprintResult creates a minimal host record from fingerprint results and submits it to the API.
 // This enables real-time host discovery visibility - operators see hosts as soon as they're detected alive.
-func (sm *ScanManager) submitFingerprintResult(ip string, result FingerprintResult) error {
+func (sm *ScanManager) submitFingerprintResult(ip string, result FingerprintResult, reports *inventoryReportTally) error {
 	// Create a minimal host with fingerprint data
 	host := sirius.Host{
 		IP: ip,
@@ -341,7 +345,7 @@ func (sm *ScanManager) submitFingerprintResult(ip string, result FingerprintResu
 		}
 	}
 
-	return sm.submitHostWithSource(host, "ping++")
+	return sm.submitHostWithSource(host, "ping++", reports)
 }
 
 // ListenForScans attaches the ScanManager to the "scan" queue.
@@ -510,6 +514,7 @@ func (sm *ScanManager) scheduleTargets(targetIPs []string) {
 		netScan := scan.SubScans["network"]
 		netScan.Type, netScan.Enabled, netScan.Status = "network", true, "running"
 		netScan.Progress.Total, netScan.Progress.Completed = len(targetIPs), 0
+		projectInventoryReports(&netScan, inventoryReportTally{}, inventoryAccountingStart)
 		scan.SubScans["network"] = netScan
 		scan.HostsCompleted = 0
 		if scan.StartTime == "" {
@@ -533,12 +538,13 @@ func (sm *ScanManager) scheduleTargets(targetIPs []string) {
 
 // scanIP performs the actual scanning of a single IP using a sequential pipeline
 func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
+	var reports inventoryReportTally
 	defer func() {
 		// Cancelled/replaced runs must not contribute progress or success.
 		if ctx.Err() != nil {
 			return
 		}
-		if err := sm.markHostComplete(ip); err != nil {
+		if err := sm.markHostComplete(ip, reports); err != nil {
 			slog.Warn("Failed to mark host completion", "ip", ip, "error", err)
 		}
 	}()
@@ -570,7 +576,7 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 		if err != nil {
 			slog.Error("Fingerprinting failed", "ip", ip, "error", err)
 			if ctx.Err() == nil {
-				sm.updateScanStatus("failed")
+				sm.updateScanStatusWithInventory("failed", reports)
 			}
 			sm.logger.LogToolExecution(sm.currentScanID, ip, "ping++", duration, false, map[string]interface{}{
 				"error": err.Error(),
@@ -593,7 +599,7 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 			})
 
 			// Submit discovered host to API for real-time visibility
-			if err := sm.submitFingerprintResult(ip, result); err != nil {
+			if err := sm.submitFingerprintResult(ip, result, &reports); err != nil {
 				slog.Warn("Failed to submit fingerprint data via API",
 					"scan_id", sm.currentScanID,
 					"ip", ip,
@@ -654,11 +660,11 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 	// Supports both "enumeration" and "port_scan" scan types for backward compatibility
 	if contains(sm.currentScanOptions.ScanTypes, "enumeration") || contains(sm.currentScanOptions.ScanTypes, "port_scan") {
 		slog.Debug("Phase 1: Port enumeration scan", "ip", ip)
-		ports, err := sm.runEnumeration(ctx, ip)
+		ports, err := sm.runEnumeration(ctx, ip, &reports)
 		if err != nil {
 			slog.Error("Enumeration failed", "ip", ip, "error", err)
 			if ctx.Err() == nil {
-				sm.updateScanStatus("failed")
+				sm.updateScanStatusWithInventory("failed", reports)
 			}
 		} else if len(ports) > 0 {
 			discoveredPorts = ports
@@ -696,10 +702,10 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 		}
 
 		// Run vulnerability scan with specific ports
-		if err := sm.runVulnerabilityWithPorts(ctx, ip, portList); err != nil {
+		if err := sm.runVulnerabilityWithPorts(ctx, ip, portList, &reports); err != nil {
 			slog.Error("Vulnerability scan failed", "ip", ip, "error", err)
 			if ctx.Err() == nil {
-				sm.updateScanStatus("failed")
+				sm.updateScanStatusWithInventory("failed", reports)
 			}
 		} else {
 			slog.Debug("Vulnerability scan completed", "ip", ip)
@@ -710,7 +716,7 @@ func (sm *ScanManager) scanIP(ctx context.Context, ip string) {
 }
 
 // markHostComplete accounts for one scheduled network target.
-func (sm *ScanManager) markHostComplete(ip string) error {
+func (sm *ScanManager) markHostComplete(ip string, reports inventoryReportTally) error {
 	var updated *store.ScanResult
 	err := sm.scanUpdater.UpdateForScan(context.Background(), sm.currentScanID, func(scan *store.ScanResult) error {
 		updated = nil
@@ -726,9 +732,12 @@ func (sm *ScanManager) markHostComplete(ip string) error {
 		}
 		scan.HostsCompleted++
 		netScan.Progress.Completed = scan.HostsCompleted
+		accounting := inventoryAccountingPartial
 		if scan.HostsCompleted == netScan.Progress.Total {
 			netScan.Status = "completed"
+			accounting = inventoryAccountingFinal
 		}
+		projectInventoryReports(&netScan, reports, accounting)
 		scan.SubScans["network"] = netScan
 		finishScanIfDone(scan)
 		updated = scan
@@ -753,7 +762,7 @@ func (sm *ScanManager) markHostComplete(ip string) error {
 }
 
 // runEnumeration performs the enumeration scan
-func (sm *ScanManager) runEnumeration(ctx context.Context, ip string) ([]int, error) {
+func (sm *ScanManager) runEnumeration(ctx context.Context, ip string, reports *inventoryReportTally) ([]int, error) {
 	startTime := time.Now()
 	enumStrategy := sm.toolFactory.CreateTool("enumeration")
 	enumResults, err := enumStrategy.ExecuteWithContext(ctx, ip)
@@ -784,7 +793,7 @@ func (sm *ScanManager) runEnumeration(ctx context.Context, ip string) ([]int, er
 		toolName := "naabu"
 
 		// Submit host data using the new source-aware API
-		if err := sm.submitHostWithSource(enumResults, toolName); err != nil {
+		if err := sm.submitHostWithSource(enumResults, toolName, reports); err != nil {
 			slog.Warn("Failed to submit enumeration data via source-aware API",
 				"scan_id", sm.currentScanID,
 				"ip", ip,
@@ -858,11 +867,11 @@ func (sm *ScanManager) vulnerabilityStrategy() ScanStrategy {
 
 // runVulnerability performs the vulnerability scan
 func (sm *ScanManager) runVulnerability(ctx context.Context, ip string) error {
-	return sm.runVulnerabilityWithPorts(ctx, ip, "")
+	return sm.runVulnerabilityWithPorts(ctx, ip, "", &inventoryReportTally{})
 }
 
 // runVulnerabilityWithPorts performs vulnerability scan with optional port override
-func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string, portList string) error {
+func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string, portList string, reports *inventoryReportTally) error {
 	startTime := time.Now()
 
 	// Port overrides are host-local. Mutating the shared options races with
@@ -899,8 +908,10 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 	}
 	sm.logger.LogVulnerabilityScan(sm.currentScanID, ip, vulnerabilities, "nmap")
 
-	// Determine the actual tool used based on scan type - vulnerability uses Nmap
-	toolName := "nmap"
+	return sm.recordVulnerabilityResults(ip, vulnResults, "nmap", reports)
+}
+
+func (sm *ScanManager) recordVulnerabilityResults(ip string, vulnResults sirius.Host, toolName string, reports *inventoryReportTally) error {
 
 	// Submit host data using the new source-aware API. If submission fails
 	// we degrade gracefully and continue the rest of the scan; the KV-store
@@ -908,7 +919,7 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 	// by an unhealthy or not-yet-implemented API endpoint. See
 	// SHA-AUDIT-2026-04.md for the original rationale (formerly an inline sed
 	// patch in sirius-engine/Dockerfile).
-	if err := sm.submitHostWithSource(vulnResults, toolName); err != nil {
+	if err := sm.submitHostWithSource(vulnResults, toolName, reports); err != nil {
 		slog.Error("Failed to submit host data via source-aware API", "error", err)
 		slog.Debug("API may be unavailable or endpoint not implemented")
 		slog.Warn("Will continue scan without source-attributed persistence", "error", err)
@@ -1131,7 +1142,13 @@ func (sm *ScanManager) cancelScan(scanID string, force bool) {
 }
 
 func (sm *ScanManager) updateScanStatus(status string) {
-	sm.setScanStatus(sm.currentScanID, status)
+	sm.updateScanStatusWithInventory(status, inventoryReportTally{})
+}
+
+func (sm *ScanManager) updateScanStatusWithInventory(status string, reports inventoryReportTally) {
+	if _, err := sm.setScanStatusWithInventory(sm.currentScanID, status, reports); err != nil {
+		slog.Warn("Could not record scan status", "scan_id", sm.currentScanID, "status", status, "error", err)
+	}
 	if status == "failed" && sm.cancel != nil {
 		sm.cancel()
 		sm.finishKeyedRun()
@@ -1141,6 +1158,10 @@ func (sm *ScanManager) updateScanStatus(status string) {
 func (sm *ScanManager) failScan(scanID string) { sm.setScanStatus(scanID, "failed") }
 
 func (sm *ScanManager) setScanStatus(scanID, status string) (bool, error) {
+	return sm.setScanStatusWithInventory(scanID, status, inventoryReportTally{})
+}
+
+func (sm *ScanManager) setScanStatusWithInventory(scanID, status string, reports inventoryReportTally) (bool, error) {
 	changed := false
 	err := sm.scanUpdater.UpdateForScan(context.Background(), scanID, func(scan *store.ScanResult) error {
 		changed = false
@@ -1162,6 +1183,7 @@ func (sm *ScanManager) setScanStatus(scanID, status string) (bool, error) {
 			}
 			changed = true
 			netScan.Type, netScan.Enabled, netScan.Status = "network", true, "failed"
+			projectInventoryReports(&netScan, reports, inventoryAccountingPartial)
 			scan.SubScans["network"] = netScan
 			scan.Status = "running"
 			finishScanIfDone(scan)
