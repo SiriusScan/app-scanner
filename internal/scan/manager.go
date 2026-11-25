@@ -224,46 +224,32 @@ func (sm *ScanManager) getSystemInfo() map[string]string {
 	return info
 }
 
-// createScanSource creates a ScanSource with enhanced configuration details
+// createScanSource creates a ScanSource with concise, human-readable scan
+// profile metadata (avoiding raw internal runtime/scanner_id dumps in notes).
 func (sm *ScanManager) createScanSource(toolName string) models.ScanSource {
 	version := sm.detectScannerVersion(toolName)
-	systemInfo := sm.getSystemInfo()
 
-	// Build comprehensive configuration string
 	var configParts []string
-
-	// Scan-specific configuration
-	if sm.currentScanOptions.PortRange != "" {
-		configParts = append(configParts, fmt.Sprintf("ports:%s", sm.currentScanOptions.PortRange))
-	}
-	if sm.currentScanOptions.Aggressive {
-		configParts = append(configParts, "aggressive:true")
+	if sm.currentScanOptions.TemplateID != "" {
+		configParts = append(configParts, fmt.Sprintf("Profile: %s", sm.currentScanOptions.TemplateID))
 	}
 	if len(sm.currentScanOptions.ScanTypes) > 0 {
-		configParts = append(configParts, fmt.Sprintf("types:%s", strings.Join(sm.currentScanOptions.ScanTypes, ",")))
+		configParts = append(configParts, fmt.Sprintf("Types: %s", strings.Join(sm.currentScanOptions.ScanTypes, ", ")))
 	}
-	if len(sm.currentScanOptions.ExcludePorts) > 0 {
-		configParts = append(configParts, fmt.Sprintf("exclude:%s", strings.Join(sm.currentScanOptions.ExcludePorts, ",")))
+	if sm.currentScanOptions.PortRange != "" {
+		ports := sm.currentScanOptions.PortRange
+		if len(ports) > 48 {
+			ports = ports[:45] + "..."
+		}
+		configParts = append(configParts, fmt.Sprintf("Ports: %s", ports))
 	}
-	if sm.currentScanOptions.TemplateID != "" {
-		configParts = append(configParts, fmt.Sprintf("template:%s", sm.currentScanOptions.TemplateID))
-	}
-
-	// System information for audit trail
-	if hostname, ok := systemInfo["hostname"]; ok {
-		configParts = append(configParts, fmt.Sprintf("host:%s", hostname))
-	}
-	if user, ok := systemInfo["user"]; ok {
-		configParts = append(configParts, fmt.Sprintf("user:%s", user))
+	if sm.currentScanOptions.Aggressive {
+		configParts = append(configParts, "Aggressive")
 	}
 
-	// Scanner metadata
-	configParts = append(configParts, fmt.Sprintf("scanner_id:%s", sm.currentScanID))
-	configParts = append(configParts, fmt.Sprintf("go_version:%s", systemInfo["go_version"]))
-
-	config := strings.Join(configParts, ";")
+	config := strings.Join(configParts, " · ")
 	if config == "" {
-		config = "default"
+		config = "Default scan"
 	}
 
 	source := models.ScanSource{
@@ -272,9 +258,7 @@ func (sm *ScanManager) createScanSource(toolName string) models.ScanSource {
 		Config:  config,
 	}
 
-	// Log source creation for debugging
 	slog.Info("Created scan source", "name", source.Name, "version", source.Version, "config", source.Config)
-
 	return source
 }
 
@@ -405,9 +389,9 @@ func (sm *ScanManager) handleMessage(msg string) {
 	var run *ScanManager
 	err = nil
 	if scanMsg.StateMode == "keyed" {
-		run, err = sm.newKeyedRunForSubject(scanMsg.ID, scanMsg.ResourceScope.OwnerSubjectID)
+		run, err = sm.newKeyedRunForSubjectWithTargets(scanMsg.ID, scanMsg.ResourceScope.OwnerSubjectID, scanMsg.Targets)
 	} else {
-		run, err = sm.newScanRun(scanMsg.ID)
+		run, err = sm.newScanRunWithTargets(scanMsg.ID, scanMsg.Targets)
 	}
 	if err != nil {
 		slog.Warn("Ignoring scan request", "scan_id", scanMsg.ID, "error", err)
@@ -944,7 +928,7 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 				ID:          vuln.VID,
 				Severity:    severity,
 				Title:       vuln.Title,
-				Description: vuln.Description,
+				Description: truncateForSummary(vuln.Description),
 				RiskScore:   vuln.RiskScore,
 				ScanSource:  "network",
 				HostID:      vulnResults.IP,

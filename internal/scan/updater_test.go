@@ -13,8 +13,9 @@ import (
 
 // fakeKVStore is a fake implementation of the KVStore interface for testing.
 type fakeKVStore struct {
-	data map[string]string
-	mu   sync.Mutex
+	data    map[string]string
+	expires map[string]int
+	mu      sync.Mutex
 }
 
 // GetValue returns the value associated with the key.
@@ -23,7 +24,7 @@ func (f *fakeKVStore) GetValue(ctx context.Context, key string) (store.ValkeyRes
 	defer f.mu.Unlock()
 	val, ok := f.data[key]
 	if !ok {
-		return store.ValkeyResponse{}, errors.New("key not found")
+		return store.ValkeyResponse{}, store.ErrKeyNotFound
 	}
 	var resp store.ValkeyResponse
 	resp.Message.Value = val
@@ -67,15 +68,29 @@ func (f *fakeKVStore) ListKeys(ctx context.Context, pattern string) ([]string, e
 	return keys, nil
 }
 
-// SetExpire sets an expiration time on a key (stub implementation).
+// SetExpire records the requested expiration for assertions.
 func (f *fakeKVStore) SetExpire(ctx context.Context, key string, ttl int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// In a real implementation, this would set TTL. For testing, we just verify the key exists.
 	if _, ok := f.data[key]; !ok {
-		return errors.New("key not found")
+		return store.ErrKeyNotFound
 	}
+	if f.expires == nil {
+		f.expires = make(map[string]int)
+	}
+	f.expires[key] = ttl
 	return nil
+}
+
+// SetValueIfAbsent creates the key only when it does not already exist.
+func (f *fakeKVStore) SetValueIfAbsent(ctx context.Context, key, value string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.data[key]; ok {
+		return false, nil
+	}
+	f.data[key] = value
+	return true, nil
 }
 
 // SetValueWithTTL sets a key with an expiration time (stub implementation).

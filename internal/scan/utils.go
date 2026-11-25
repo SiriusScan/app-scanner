@@ -101,6 +101,18 @@ func calculateSeverity(score float64) string {
 	}
 }
 
+// maxSummaryDescriptionLen bounds what live scan state duplicates from a
+// finding. The full evidence lives in the persisted host record; scan
+// state is rewritten on every progress update and must stay small.
+const maxSummaryDescriptionLen = 512
+
+func truncateForSummary(s string) string {
+	if len(s) > maxSummaryDescriptionLen {
+		return s[:maxSummaryDescriptionLen]
+	}
+	return s
+}
+
 // ============================================================================
 // Network/IP Helpers
 // ============================================================================
