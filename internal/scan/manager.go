@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,23 +80,23 @@ type ScanMessage struct {
 
 // ScanManager manages scan operations.
 type ScanManager struct {
-	workerPool         *WorkerPool
-	ctx                context.Context
-	cancel             context.CancelFunc
-	currentScanID      string
-	currentScanOptions ScanOptions
-	nseSync            *nse.SyncManager
-	templateManager    *TemplateManager
-	scanStrategies     map[string]ScanStrategy
-	options            *ScanOptions
-	toolFactory        scanToolFactory
-	scanUpdater        *ScanUpdater
-	kvStore            store.KVStore
-	apiBaseURL         string       // API base URL for source-aware submissions
-	scopedIngestURL    string       // Explicit trusted endpoint for subject-scoped observations
-	subjectID          string       // Opaque subject for this run, empty for global
-	apiHTTPClient      *http.Client // Shared HTTP client for API submissions
-	logger             scanLogger   // Centralized logging client
+	admittedScanPlan
+	workerPool      *WorkerPool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	currentScanID   string
+	nseSync         *nse.SyncManager
+	templateManager *TemplateManager
+	scanStrategies  map[string]ScanStrategy
+	options         *ScanOptions
+	toolFactory     scanToolFactory
+	scanUpdater     *ScanUpdater
+	kvStore         store.KVStore
+	apiBaseURL      string       // API base URL for source-aware submissions
+	scopedIngestURL string       // Explicit trusted endpoint for subject-scoped observations
+	subjectID       string       // Opaque subject for this run, empty for global
+	apiHTTPClient   *http.Client // Shared HTTP client for API submissions
+	logger          scanLogger   // Centralized logging client
 
 	// Cancellation support
 	activeScanCtx    context.Context    // Context for the currently running scan
@@ -412,11 +413,10 @@ func (sm *ScanManager) handleMessage(msg string) {
 		slog.Warn("Ignoring scan request", "scan_id", scanMsg.ID, "error", err)
 		return
 	}
-	run.handleScanMessage(scanMsg)
+	run.handleScanMessage(scanMsg, sm.templateManager.GetTemplate)
 }
 
-func (sm *ScanManager) handleScanMessage(scanMsg ScanMessage) {
-	// Log scan initiation
+func (sm *ScanManager) handleScanMessage(scanMsg ScanMessage, lookup templateLookup) {
 	sm.logger.LogScanEvent(scanMsg.ID, "scan_initiated", "Scan request received", map[string]interface{}{
 		"targets_count": len(scanMsg.Targets),
 		"priority":      scanMsg.Priority,
@@ -424,51 +424,48 @@ func (sm *ScanManager) handleScanMessage(scanMsg ScanMessage) {
 		"scan_types":    scanMsg.Options.ScanTypes,
 	})
 
-	// Resolve template if template ID provided
-	if scanMsg.Options.TemplateID != "" {
-		template, err := sm.templateManager.GetTemplate(sm.ctx, scanMsg.Options.TemplateID)
-		if err != nil {
-			slog.Error("Failed to get template", "template_id", scanMsg.Options.TemplateID, "error", err)
-			sm.logger.LogScanError(scanMsg.ID, "template_resolution", "template_not_found", "Failed to resolve template", err)
+	plan, err := resolveScanPlan(sm.ctx, scanMsg.Options, lookup)
+	if err != nil {
+		if !sm.cancelAdmissionIfNeeded(err) {
+			sm.logger.LogScanError(scanMsg.ID, "template_resolution", "template_admission_failed", "Failed to admit scan plan", err)
 			sm.updateScanStatus("failed")
-			return
 		}
-
-		// Apply template options (user-provided options override template defaults)
-		if scanMsg.Options.PortRange == "" {
-			scanMsg.Options.PortRange = template.ScanOptions.PortRange
-		}
-		if len(scanMsg.Options.ScanTypes) == 0 {
-			scanMsg.Options.ScanTypes = template.ScanOptions.ScanTypes
-		}
-		if len(scanMsg.Options.ExcludePorts) == 0 {
-			scanMsg.Options.ExcludePorts = template.ScanOptions.ExcludePorts
-		}
-		if scanMsg.Options.MaxRetries == 0 {
-			scanMsg.Options.MaxRetries = template.ScanOptions.MaxRetries
-		}
-		if !scanMsg.Options.Aggressive {
-			scanMsg.Options.Aggressive = template.ScanOptions.Aggressive
-		}
-		if !scanMsg.Options.Parallel {
-			scanMsg.Options.Parallel = template.ScanOptions.Parallel
-		}
-
-		slog.Info("Resolved template", "template_id", template.ID, "template_name", template.Name)
+		return
 	}
+	sm.admittedScanPlan = plan
 
-	sm.currentScanOptions = cloneScanOptions(scanMsg.Options)
-	sm.toolFactory.SetOptions(sm.currentScanOptions)
+	sm.logger.LogScanEvent(scanMsg.ID, "scan_plan_admitted", "Scan plan resolved", map[string]interface{}{
+		"template_id": plan.currentScanOptions.TemplateID,
+		"plan_digest": plan.digest,
+	})
+	if plan.agentOnly {
+		sm.cancel()
+		sm.finishKeyedRun()
+		return
+	}
+	sm.toolFactory.SetOptions(cloneScanOptions(plan.currentScanOptions))
 
 	// Expand and deduplicate every target before workers start. Incremental
 	// totals let the first fast host complete a scan before later targets exist.
 	targetIPs, err := sm.prepareScanTargets(scanMsg.Targets)
 	if err != nil {
-		slog.Error("Failed to prepare scan targets", "scan_id", sm.currentScanID, "error", err)
-		sm.updateScanStatus("failed")
+		if !sm.cancelAdmissionIfNeeded(err) {
+			slog.Error("Failed to prepare scan targets", "scan_id", sm.currentScanID, "error", err)
+			sm.updateScanStatus("failed")
+		}
 		return
 	}
 	sm.scheduleTargets(targetIPs)
+}
+
+func (sm *ScanManager) cancelAdmissionIfNeeded(err error) bool {
+	if sm.ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+		return false
+	}
+	sm.updateScanStatus("cancelled")
+	sm.cancel()
+	sm.finishKeyedRun()
+	return true
 }
 
 // validateScanMessage performs validation on the scan message
@@ -541,11 +538,10 @@ func (sm *ScanManager) scheduleTargets(targetIPs []string) {
 		return
 	}
 	sm.logger.LogScanStarted(sm.currentScanID, targetIPs, map[string]interface{}{
-		"scan_types": sm.currentScanOptions.ScanTypes,
-		"port_range": sm.currentScanOptions.PortRange,
+		"scan_types": append([]string(nil), sm.currentScanOptions.ScanTypes...),
 	})
 	for _, ip := range targetIPs {
-		if !sm.workerPool.addTask(sm.ctx, ScanTask{IP: ip, Options: sm.currentScanOptions, run: sm}) {
+		if !sm.workerPool.addTask(sm.ctx, ScanTask{IP: ip, run: sm}) {
 			return
 		}
 	}
@@ -864,6 +860,18 @@ func portsToString(ports []int) string {
 	return strings.Join(strPorts, ",")
 }
 
+// vulnerabilityStrategy passes a private copy of the admitted selection to the adapter.
+func (sm *ScanManager) vulnerabilityStrategy() ScanStrategy {
+	strategy := sm.toolFactory.CreateTool("vulnerability")
+	if nmapStrategy, ok := strategy.(*NmapStrategy); ok {
+		if len(sm.scriptSelection) > 0 {
+			nmapStrategy.ScriptList = append([]string(nil), sm.scriptSelection...)
+		}
+		nmapStrategy.PortRange = sm.currentScanOptions.PortRange
+	}
+	return strategy
+}
+
 // runVulnerability performs the vulnerability scan
 func (sm *ScanManager) runVulnerability(ctx context.Context, ip string) error {
 	return sm.runVulnerabilityWithPorts(ctx, ip, "")
@@ -877,32 +885,7 @@ func (sm *ScanManager) runVulnerabilityWithPorts(ctx context.Context, ip string,
 	// other workers and can attribute one host's port list to another host.
 	sm = sm.forHostPorts(portList)
 
-	// Get script list from template if template ID is provided
-	var scriptList []string
-	if sm.currentScanOptions.TemplateID != "" {
-		scripts, err := sm.templateManager.ResolveScripts(sm.ctx, sm.currentScanOptions.TemplateID)
-		if err != nil {
-			slog.Warn("Failed to resolve scripts from template", "error", err)
-		} else {
-			scriptList = scripts
-			slog.Info("Resolved scripts from template", "count", len(scriptList), "template_id", sm.currentScanOptions.TemplateID)
-		}
-	}
-
-	// Create vulnerability tool with script list
-	vulnStrategy := sm.toolFactory.CreateTool("vulnerability")
-
-	// If we have an nmap strategy, configure it with scripts and the current port range
-	if nmapStrat, ok := vulnStrategy.(*NmapStrategy); ok {
-		// Set scripts if available
-		if len(scriptList) > 0 {
-			nmapStrat.ScriptList = scriptList
-		}
-		// CRITICAL: Update the port range from currentScanOptions (which may have been overridden)
-		nmapStrat.PortRange = sm.currentScanOptions.PortRange
-		slog.Debug("Configured Nmap strategy", "script_count", len(scriptList), "port_range", nmapStrat.PortRange)
-	}
-
+	vulnStrategy := sm.vulnerabilityStrategy()
 	vulnResults, err := vulnStrategy.ExecuteWithContext(ctx, ip)
 	duration := time.Since(startTime)
 

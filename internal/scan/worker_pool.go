@@ -8,9 +8,8 @@ import (
 
 // ScanTask represents a single scanning task
 type ScanTask struct {
-	IP      string
-	Options ScanOptions
-	run     *ScanManager
+	IP  string
+	run *ScanManager
 }
 
 // WorkerPool manages a pool of scanner workers
