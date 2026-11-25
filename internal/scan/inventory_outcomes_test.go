@@ -233,6 +233,7 @@ func TestInventoryReportReadmissionPreservesUnavailableMetadata(t *testing.T) {
 	const valid = `{"version":1,"attempted":0,"accepted":0,"rejected":0,"unknown":0,"finalized":false}`
 	for _, fixture := range []struct{ name, prior string }{
 		{"missing version", strings.Replace(valid, `"version":1,`, "", 1)},
+		{"noncanonical alias cannot repair count", strings.Replace(valid, `"accepted":0`, `"accepted":1,"Accepted":0`, 1)},
 		{"missing count", strings.Replace(valid, `"accepted":0,`, "", 1)},
 		{"null count", strings.Replace(valid, `"rejected":0`, `"rejected":null`, 1)},
 		{"missing finalized", strings.Replace(valid, `,"finalized":false`, "", 1)},

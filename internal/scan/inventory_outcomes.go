@@ -184,12 +184,22 @@ func decodeInventoryReportSummary(raw json.RawMessage) (inventoryReportSummary, 
 	if json.Unmarshal(raw, &fields) != nil {
 		return summary, false
 	}
-	for _, key := range []string{"version", "attempted", "accepted", "rejected", "unknown", "finalized"} {
-		if value := fields[key]; len(value) == 0 || string(value) == "null" {
+	// Decode the canonical wire keys directly so casing aliases cannot change
+	// a field that status readers resolve by its exact name.
+	required := map[string]any{
+		"version":   &summary.Version,
+		"attempted": &summary.Attempted,
+		"accepted":  &summary.Accepted,
+		"rejected":  &summary.Rejected,
+		"unknown":   &summary.Unknown,
+		"finalized": &summary.Finalized,
+	}
+	for key, destination := range required {
+		if value := fields[key]; len(value) == 0 || string(value) == "null" || json.Unmarshal(value, destination) != nil {
 			return summary, false
 		}
 	}
-	if string(fields["interrupted"]) == "null" {
+	if value, ok := fields["interrupted"]; ok && (string(value) == "null" || json.Unmarshal(value, &summary.Interrupted) != nil) {
 		return summary, false
 	}
 	if rawReasons, ok := fields["reasons"]; ok {
@@ -207,9 +217,9 @@ func decodeInventoryReportSummary(raw json.RawMessage) (inventoryReportSummary, 
 				return summary, false
 			}
 		}
-	}
-	if err := json.Unmarshal(raw, &summary); err != nil {
-		return summary, false
+		if err := json.Unmarshal(rawReasons, &summary.Reasons); err != nil {
+			return summary, false
+		}
 	}
 	return summary, summary.valid()
 }
