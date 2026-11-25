@@ -1,25 +1,27 @@
 # Reproducible dependency builds
 
-The scanner pins the published github.com/SiriusScan/go-api module in go.mod.
-It does not replace the SDK with a sibling checkout. Use GOWORK=off to verify
-release builds without a parent workspace overriding that pin. For coordinated
-SDK development, use an explicit local Go workspace instead of changing the
-release dependency in go.mod.
+The scanner pins published `github.com/SiriusScan/go-api` and
+`github.com/SiriusScan/pingpp` modules in `go.mod` and records their
+checksums in `go.sum`. A clean checkout needs Go 1.24, libpcap development
+headers, and normal access to the Go module proxy and checksum database.
 
-The github.com/SiriusScan/ping++ module retains its existing ../ping++ replacement.
-Its required v0.0.0 is not a published release. Production engine builds clone
-SiriusScan/pingpp to that sibling path and pin it using PINGPP_COMMIT_SHA.
-CI currently checks out master. For reproducible local verification, use a clean
-sibling at 9508a16c40a49746feb7cab4b8c1c358246169b0, the production pin and
-verified CI branch head at this change. Review future CI branch advances separately.
+From the scanner checkout:
 
-With that sibling and libpcap development headers installed, run:
+    GOWORK=off go mod download
+    GOWORK=off go list -mod=readonly -m github.com/SiriusScan/go-api github.com/SiriusScan/pingpp
+    GOWORK=off go test -mod=readonly -race -short ./...
+    GOWORK=off go vet -mod=readonly ./...
+    GOWORK=off go build -mod=readonly ./...
 
-    GOWORK=off go list -m github.com/SiriusScan/go-api
-    GOWORK=off go test -race -short ./...
-    GOWORK=off go vet ./...
-    GOWORK=off go build ./...
+The short test suite uses offline fixtures. Opt-in store integration tests
+require disposable services.
 
-These commands compile the scanner; they do not start it or dispatch scans.
-Opt-in store integration tests require fresh disposable services. Do not point
-them at production stores or databases.
+For coordinated local development, create a Go workspace outside the
+repositories and add the scanner and any dependency checkout you want to edit.
+Run release verification with `GOWORK=off` so it uses the committed module
+versions.
+
+When bumping pingpp, use a published full commit SHA or canonical release
+version, regenerate `go.sum`, and record the resolved module version and
+source commit for image provenance. The Sirius engine cutover is tracked in
+[SiriusScan/Sirius#181](https://github.com/SiriusScan/Sirius/issues/181).

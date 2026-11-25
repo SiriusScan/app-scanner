@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/SiriusScan/ping++/integration/appscanner"
+	"github.com/SiriusScan/pingpp/integration/appscanner"
 )
 
 // DefaultFingerprintProbes are the default probe types for fingerprinting.

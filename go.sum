@@ -16,6 +16,8 @@ github.com/SiriusScan/go-api v0.0.25 h1:FhKAXx+R3e9bNjouwH0C1++JR5llKZYb/RW8/dfg
 github.com/SiriusScan/go-api v0.0.25/go.mod h1:OnL5Cp7xjpa0NdaZ5jbG9NKfln2V6gihRaqKJjOKAxw=
 github.com/SiriusScan/go-api v0.0.26 h1:UEw5cR8iJGGwfbuT82keSG3Id86knCrD0cW0PIYTwsI=
 github.com/SiriusScan/go-api v0.0.26/go.mod h1:PsWy9dXy6m+bgJMG+b7u9N+4OS0EsJS4pqnTdzHbV+Q=
+github.com/SiriusScan/pingpp v0.0.0-20261125012228-a6e4289ccaf4 h1:llYBnZvdXtQ+uoesr0GMeDCAxiUQlvg9uqSfZGEJS8c=
+github.com/SiriusScan/pingpp v0.0.0-20261125012228-a6e4289ccaf4/go.mod h1:NA0V/VAj1PVerQ6HigAHPcd5r2TLKhHAwNBMlx8re/4=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=
 github.com/VividCortex/ewma v1.2.0/go.mod h1:nz4BbCtbLyFDeC9SUHbtcT5644juEuWfUAUnGx7j5l4=
 github.com/akrylysov/pogreb v0.10.1 h1:FqlR8VR7uCbJdfUob916tPM+idpKgeESDXOA1K0DK4w=
