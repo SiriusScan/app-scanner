@@ -160,6 +160,35 @@ func TestExtractVulnerabilities(t *testing.T) {
 	}
 }
 
+func TestExtractVulnersVulnerabilitiesEvidenceAndScore(t *testing.T) {
+	output := "\n  cpe:/a:apache:http_server:2.4.49:\n" +
+		"    CVE-2021-41773  7.5  https://vulners.com/cve/CVE-2021-41773\n" +
+		"    CVE-2021-42013  9.8  https://vulners.com/cve/CVE-2021-42013\n" +
+		"    CVE-2021-99999\n"
+	vulns := extractVulnersVulnerabilities(ScriptResult{ID: "vulners", Output: output})
+	require.Len(t, vulns, 3)
+	byID := make(map[string]sirius.Vulnerability)
+	for _, v := range vulns {
+		byID[v.VID] = v
+		// Evidence is per-CVE and bounded: it never contains another
+		// finding's line, let alone the whole script output.
+		assert.NotContains(t, v.Description, "\n")
+		assert.LessOrEqual(t, len(v.Description), maxEvidenceLen)
+	}
+	assert.Equal(t, 7.5, byID["CVE-2021-41773"].RiskScore)
+	assert.Equal(t, 9.8, byID["CVE-2021-42013"].CVSSScore)
+	assert.Equal(t, 0.75, byID["CVE-2021-41773"].Confidence)
+	assert.Equal(t, "high", byID["CVE-2021-41773"].Severity)
+	assert.Equal(t, "critical", byID["CVE-2021-42013"].Severity)
+	assert.Contains(t, byID["CVE-2021-41773"].Description, "apache http server 2.4.49")
+	assert.NotContains(t, byID["CVE-2021-41773"].Description, "https://")
+	assert.NotContains(t, byID["CVE-2021-41773"].Description, "CVE-2021-42013")
+	assert.Contains(t, byID["CVE-2021-41773"].Metadata["evidence"], "cpe:/a:apache:http_server:2.4.49")
+	assert.Equal(t, []string{"https://vulners.com/cve/CVE-2021-41773"}, byID["CVE-2021-41773"].Metadata["references"])
+	// No reported score stays unknown (0), never a fabricated medium.
+	assert.Equal(t, 0.0, byID["CVE-2021-99999"].RiskScore)
+}
+
 func TestDeduplicateVulnerabilities(t *testing.T) {
 	vulns := []sirius.Vulnerability{
 		{VID: "CVE-2021-1234", Title: "First"},

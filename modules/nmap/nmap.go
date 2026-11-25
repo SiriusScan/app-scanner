@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/SiriusScan/app-scanner/internal/nse"
@@ -395,21 +396,32 @@ func extractVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 			cves := extractCVEsFromText(result.Output)
 			if len(cves) > 0 {
 				for _, cve := range cves {
+					ev := evidenceFor(result.Output, cve)
 					vuln := sirius.Vulnerability{
 						VID:         cve,
-						Title:       cve, // Just use the CVE ID as the title
-						Description: result.Output,
-						RiskScore:   7.5, // Default high severity for SMB vulnerabilities
+						Title:       cve,
+						Description: fmt.Sprintf("Confirmed SMB vulnerability (%s) detected by nmap script %s", cve, result.ID),
+						CVEID:       cve,
+						CVSSScore:   7.5,
+						RiskScore:   7.5,
+						Severity:    severityForScore(7.5),
+						Confidence:  0.90,
+						Metadata:    buildFindingMetadata(ev, "", result.ID, extractURLsFromLine(ev)),
 					}
 					vulns = append(vulns, vuln)
 				}
 			} else {
 				// If no CVEs found but still vulnerable, create a generic entry
+				ev := boundedEvidence(result.Output)
 				vuln := sirius.Vulnerability{
 					VID:         fmt.Sprintf("%s-vulnerability", result.ID),
 					Title:       fmt.Sprintf("SMB Vulnerability: %s", result.ID),
-					Description: result.Output,
-					RiskScore:   7.5, // Default high severity
+					Description: fmt.Sprintf("Confirmed SMB vulnerability detected by nmap script %s", result.ID),
+					CVSSScore:   7.5,
+					RiskScore:   7.5,
+					Severity:    severityForScore(7.5),
+					Confidence:  0.90,
+					Metadata:    buildFindingMetadata(ev, "", result.ID, extractURLsFromLine(ev)),
 				}
 				vulns = append(vulns, vuln)
 			}
@@ -421,21 +433,27 @@ func extractVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 		// For all other scripts
 		// Look for CVE patterns in script output
 		if cves := extractCVEsFromText(result.Output); len(cves) > 0 {
+			confirmed := strings.Contains(result.Output, "VULNERABLE") || strings.Contains(result.Output, "vulnerable")
+			score := 5.0
+			confidence := 0.65
+			prefix := "Potential vulnerability"
+			if confirmed {
+				score = 7.5
+				confidence = 0.90
+				prefix = "Confirmed vulnerability"
+			}
 			for _, cve := range cves {
-				// Extract additional information from the output
-				severity := 5.0 // Default medium severity
-
-				// Try to extract severity from the output
-				if strings.Contains(result.Output, "VULNERABLE") || strings.Contains(result.Output, "vulnerable") {
-					// Set a higher severity for confirmed vulnerabilities
-					severity = 7.5 // Default high severity for confirmed vulnerabilities
-				}
-
+				ev := evidenceFor(result.Output, cve)
 				vuln := sirius.Vulnerability{
 					VID:         cve,
-					Title:       cve, // Just use the CVE ID as the title
-					Description: result.Output,
-					RiskScore:   severity,
+					Title:       cve,
+					Description: fmt.Sprintf("%s (%s) detected by nmap script %s", prefix, cve, result.ID),
+					CVEID:       cve,
+					CVSSScore:   score,
+					RiskScore:   score,
+					Severity:    severityForScore(score),
+					Confidence:  confidence,
+					Metadata:    buildFindingMetadata(ev, "", result.ID, extractURLsFromLine(ev)),
 				}
 
 				vulns = append(vulns, vuln)
@@ -447,29 +465,180 @@ func extractVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 	return vulns
 }
 
-// extractVulnersVulnerabilities processes vulners script output specifically
+// maxEvidenceLen bounds the scanner evidence stored per finding. Findings
+// carry the evidence for that one CVE, never the whole script output:
+// copying full output into every finding made host reports grow with the
+// square of the finding count.
+const maxEvidenceLen = 512
+
+func boundedEvidence(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > maxEvidenceLen {
+		return s[:maxEvidenceLen]
+	}
+	return s
+}
+
+// evidenceFor returns the output line mentioning cve, or a bounded excerpt
+// of the whole output when no single line carries it.
+func evidenceFor(output, cve string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, cve) {
+			return boundedEvidence(line)
+		}
+	}
+	return boundedEvidence(output)
+}
+
+// vulnersScore parses the CVSS score vulners prints after the CVE ID, e.g.
+// "CVE-2021-41773  7.5  https://vulners.com/cve/CVE-2021-41773".
+func vulnersScore(line, cve string) float64 {
+	fields := strings.Fields(line)
+	for i, field := range fields {
+		if field != cve || i+1 >= len(fields) {
+			continue
+		}
+		if score, err := strconv.ParseFloat(fields[i+1], 64); err == nil && score >= 0 && score <= 10 {
+			return score
+		}
+	}
+	return 0
+}
+
+func severityForScore(score float64) string {
+	switch {
+	case score >= 9.0:
+		return "critical"
+	case score >= 7.0:
+		return "high"
+	case score >= 4.0:
+		return "medium"
+	case score > 0:
+		return "low"
+	default:
+		return "informational"
+	}
+}
+
+func formatCPELabel(cpe string) string {
+	trimmed := strings.TrimSpace(strings.TrimSuffix(cpe, ":"))
+	if trimmed == "" {
+		return ""
+	}
+	rest := strings.TrimPrefix(trimmed, "cpe:/")
+	if rest != trimmed {
+		parts := strings.Split(rest, ":")
+		// cpe:/a:vendor:product:version -> vendor product version
+		if len(parts) >= 3 {
+			labelParts := make([]string, 0, 3)
+			for _, p := range parts[1:] {
+				p = strings.ReplaceAll(strings.TrimSpace(p), "_", " ")
+				if p != "" && p != "*" && p != "-" {
+					labelParts = append(labelParts, p)
+				}
+			}
+			if len(labelParts) > 0 {
+				return strings.Join(labelParts, " ")
+			}
+		}
+	}
+	return trimmed
+}
+
+func extractURLsFromLine(line string) []string {
+	var refs []string
+	seen := make(map[string]bool)
+	for _, field := range strings.Fields(line) {
+		trimmed := strings.TrimRight(field, ".,;)")
+		if (strings.HasPrefix(trimmed, "https://") || strings.HasPrefix(trimmed, "http://")) && !seen[trimmed] {
+			seen[trimmed] = true
+			refs = append(refs, trimmed)
+		}
+	}
+	return refs
+}
+
+func buildFindingMetadata(evidence, cpe, scriptID string, refs []string) map[string]interface{} {
+	meta := map[string]interface{}{}
+	if evidence != "" {
+		meta["evidence"] = evidence
+	}
+	if cpe != "" {
+		meta["cpe"] = cpe
+	}
+	if scriptID != "" {
+		meta["script"] = scriptID
+	}
+	if len(refs) > 0 {
+		meta["references"] = refs
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
+}
+
+// extractVulnersVulnerabilities processes vulners script output specifically.
+// Each finding keeps a concise human-readable description, its own bounded
+// evidence line and reference URLs in metadata, accurate version-match
+// confidence, and the CVSS score vulners reported (unknown scores stay 0
+// rather than being fabricated).
 func extractVulnersVulnerabilities(result ScriptResult) []sirius.Vulnerability {
 	var vulns []sirius.Vulnerability
-
-	// Extract CVEs from vulners output
-	cves := extractCVEsFromText(result.Output)
-	for _, cve := range cves {
-		// Try to get structured info from the elements
-		var description string
-		if desc, ok := result.Elements[cve]; ok {
-			description = desc
-		} else {
-			description = result.Output
+	seen := make(map[string]bool)
+	cpe := ""
+	for _, line := range strings.Split(result.Output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "cpe:") {
+			cpe = strings.TrimSuffix(trimmed, ":")
+			continue
 		}
-
+		for _, cve := range extractCVEsFromText(line) {
+			if seen[cve] {
+				continue
+			}
+			seen[cve] = true
+			evidence := boundedEvidence(trimmed)
+			if cpe != "" && !strings.Contains(evidence, cpe) {
+				evidence = boundedEvidence(cpe + " " + evidence)
+			}
+			score := vulnersScore(line, cve)
+			refs := extractURLsFromLine(trimmed)
+			desc := fmt.Sprintf("Potential vulnerability %s matched by nmap vulners", cve)
+			if label := formatCPELabel(cpe); label != "" {
+				desc = fmt.Sprintf("Vulnerable version detected for %s (%s) via nmap vulners", label, cve)
+			}
+			vulns = append(vulns, sirius.Vulnerability{
+				VID:         cve,
+				Title:       cve,
+				Description: desc,
+				CVEID:       cve,
+				CVSSScore:   score,
+				RiskScore:   score,
+				Severity:    severityForScore(score),
+				Confidence:  0.75,
+				Metadata:    buildFindingMetadata(evidence, cpe, "vulners", refs),
+			})
+		}
+	}
+	// CVEs mentioned outside a scannable line (e.g. wrapped output) still
+	// become findings with bounded evidence.
+	for _, cve := range extractCVEsFromText(result.Output) {
+		if seen[cve] {
+			continue
+		}
+		seen[cve] = true
+		ev := evidenceFor(result.Output, cve)
 		vulns = append(vulns, sirius.Vulnerability{
 			VID:         cve,
-			Title:       cve, // Just use the CVE ID as the title
-			Description: description,
-			RiskScore:   5.0, // Default medium severity
+			Title:       cve,
+			Description: fmt.Sprintf("Potential vulnerability %s matched by nmap vulners", cve),
+			CVEID:       cve,
+			Severity:    severityForScore(0),
+			Confidence:  0.75,
+			Metadata:    buildFindingMetadata(ev, "", "vulners", extractURLsFromLine(ev)),
 		})
 	}
-
 	return vulns
 }
 
